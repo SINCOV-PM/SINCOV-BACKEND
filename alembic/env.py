@@ -5,20 +5,20 @@ import os
 from dotenv import load_dotenv
 from app.db.base import Base
 
-# Cargar variables de entorno
+# Load environment variables
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise ValueError("No DATABASE_URL set for alembic migrations")
 
-# Configuración base de Alembic
+# Alembic base configuration
 config = context.config
 config.set_main_option("sqlalchemy.url", DATABASE_URL)
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Metadata de tus modelos
+# Metadata from your models
 target_metadata = Base.metadata
 
 
