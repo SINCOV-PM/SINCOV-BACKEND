@@ -1,4 +1,4 @@
-name: CI - FastAPI & PostgreSQL
+name: CI
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
     branches: [ "main", "develop" ]
 
 jobs:
-  test:
+  build:
     name: Run Tests
     runs-on: ubuntu-latest
 
