@@ -1,8 +1,9 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.api import routes_predict, routes_reports, routes_stations
+from app.core.config import settings
 
-app = FastAPI(title="SINCOV-PM API", version="0.1")
+app = FastAPI(title=settings.PROJECT_NAME, version=settings.PROJECT_VERSION)
 
 # Configuración CORS
 app.add_middleware(
