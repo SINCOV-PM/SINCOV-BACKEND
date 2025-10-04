@@ -7,3 +7,4 @@ from app.models.predict import Prediction
 from app.models.report import Report
 from app.models.station import Station
 from app.models.sensor import Sensor
+from app.models.alert import Alert

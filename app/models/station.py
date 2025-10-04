@@ -15,5 +15,5 @@ class Station(Base):
     reports = relationship("Report", back_populates="station", cascade="all, delete-orphan")
     predictions = relationship("Prediction", back_populates="station", cascade="all, delete-orphan")
     monitors = relationship("Monitor", back_populates="station", cascade="all, delete-orphan")
-
+    subscriptions = relationship("Subscription", back_populates="station", cascade="all, delete-orphan")
 
