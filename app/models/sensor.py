@@ -9,7 +9,7 @@ class Sensor(Base):
 
     id = Column(BigInteger, primary_key=True, index=True, autoincrement=True)
     monitor_id = Column(BigInteger, ForeignKey("monitors.id"), nullable=False, index=True)
-    timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+    timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
     value = Column(Float, nullable=False)
 
     monitor = relationship("Monitor", back_populates="sensors")
