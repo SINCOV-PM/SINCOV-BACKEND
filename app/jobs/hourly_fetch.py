@@ -1,4 +1,3 @@
-# app/jobs/hourly_fetch.py
 import requests
 import json
 import logging
@@ -8,7 +7,7 @@ from app.db.session import SessionLocal
 from app.models.station import Station
 from app.models.monitor import Monitor
 from app.models.sensor import Sensor
-from app.utils.rmcab_utils import to_dotnet_ticks, build_rmcab_params
+from app.utils.rmcab_utils import to_dotnet_ticks, build_rmcab_params, parse_rmcab_timestamp
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -20,63 +19,63 @@ logger = logging.getLogger(__name__)
 
 def fetch_reports_job():
     """
-    Descarga reportes para todas las estaciones usando el formato correcto de RMCAB API.
+    Downloads reports for all stations using the correct RMCAB API format.
     """
-    logger.info("Ejecutando tarea programada: descarga de reportes RMCAB")
+    logger.info("Running scheduled task: RMCAB report download")
 
-    # Configuración de la API
+    # API Configuration
     host = "http://rmcab.ambientebogota.gov.co"
     base_url = "/Report/GetMultiStationsReportNewAsync"
     full_url = f"{host}{base_url}"
     
-    # Configuración de tiempo
+    # Time Configuration
     tz = pytz.timezone("America/Bogota")
     now = datetime.now(tz)
     
-    # Probar diferentes rangos de tiempo
+    # Try different time ranges
     time_configs = [
-        {"name": "Ultima hora", "hours": 1, "granularity": 60},
-        {"name": "Ultimas 3 horas", "hours": 3, "granularity": 60},
-        {"name": "Ultimas 24 horas", "hours": 24, "granularity": 60},
+        {"name": "Last hour", "hours": 1, "granularity": 60},
+        {"name": "Last 3 hours", "hours": 3, "granularity": 60},
+        {"name": "Last 24 hours", "hours": 24, "granularity": 60},
     ]
 
     db = SessionLocal()
 
     try:
-        # Obtener todas las estaciones
+        # Get all stations
         stations = db.query(Station).all()
-        logger.info(f"Conteo de estaciones en BD: {len(stations)}")
+        logger.info(f"Found {len(stations)} stations in DB")
 
         for station in stations:
             logger.info(f"\n{'='*80}")
-            logger.info(f"Procesando estación: {station.name} (ID RMCAB: {station.station_rmcab_id})")
+            logger.info(f"Processing station: {station.name} (RMCAB ID: {station.station_rmcab_id})")
             logger.info(f"{'='*80}")
             
-            # Obtener todos los monitores de esta estación
+            # Get all monitors for this station
             monitors = db.query(Monitor).filter(Monitor.station_id == station.id).all()
             
             if not monitors:
-                logger.warning(f"No hay monitores configurados para {station.name}")
+                logger.warning(f"No monitors configured for {station.name}")
                 continue
             
-            logger.info(f"Monitores configurados: {len(monitors)}")
+            logger.info(f"{len(monitors)} monitors configured")
             
-            # Filtrar monitores que tengan código definido
+            # Filter monitors that have a defined code
             monitors_with_code = [m for m in monitors if m.code]
             
             if not monitors_with_code:
-                logger.warning(f"No hay monitores con código RMCAB para {station.name}")
+                logger.warning(f"No monitors with RMCAB code available for {station.name}")
                 continue
             
-            # Crear lista de códigos de monitores y diccionario para mapeo
+            # Create list of monitor codes and dictionary for mapping
             monitor_ids = [m.code for m in monitors_with_code]
             monitor_dict = {m.code: m for m in monitors_with_code}
             
-            logger.debug(f"Códigos de monitor para API: {monitor_ids}")
+            logger.debug(f"Monitor codes for API: {monitor_ids}")
             
             data_found = False
             
-            # Probar diferentes rangos de tiempo
+            # Try different time ranges
             for config in time_configs:
                 if data_found:
                     break
@@ -84,11 +83,11 @@ def fetch_reports_job():
                 from_time = now - timedelta(hours=config["hours"])
                 to_time = now
                 
-                # Convertir a .NET ticks
+                # Convert to .NET ticks
                 from_ticks = to_dotnet_ticks(from_time.isoformat(), str(tz))
                 to_ticks = to_dotnet_ticks(to_time.isoformat(), str(tz))
                 
-                # Construir parámetros
+                # Build parameters
                 params = build_rmcab_params(
                     station_id=station.station_rmcab_id,
                     station_name=station.name,
@@ -102,112 +101,92 @@ def fetch_reports_job():
                 )
                 
                 try:
-                    logger.info(f"Probando rango: {config['name']}")
-                    logger.debug(f"  Desde: {from_time.strftime('%Y-%m-%d %H:%M:%S')}")
-                    logger.debug(f"  Hasta: {to_time.strftime('%Y-%m-%d %H:%M:%S')}")
-                    logger.debug(f"  From ticks: {from_ticks}")
-                    logger.debug(f"  To ticks: {to_ticks}")
+                    logger.info(f"Testing range: {config['name']}")
+                    logger.debug(f" From: {from_time.strftime('%Y-%m-%d %H:%M:%S')}")
+                    logger.debug(f" To: {to_time.strftime('%Y-%m-%d %H:%M:%S')}")
+                    logger.debug(f" From ticks: {from_ticks}")
+                    logger.debug(f" To ticks: {to_ticks}")
                     
-                    # Hacer la petición
+                    # Make the request
                     response = requests.get(full_url, params=params, timeout=30)
                     
-                    logger.info(f"  Status: {response.status_code}")
-                    logger.debug(f"  URL: {response.url}")
+                    logger.info(f" Status: {response.status_code}")
+                    logger.debug(f" URL: {response.url}")
 
                     if response.status_code != 200:
-                        logger.warning(f"  Error {response.status_code} en la solicitud: {response.text[:200]}")
+                        logger.warning(f" Error {response.status_code}: {response.text[:200]}")
                         continue
 
-                    # Parsear respuesta JSON
+                    # Parse JSON response
                     data = response.json()
                     
-                    # La API puede retornar diferentes estructuras
+                    # The API can return different structures
                     data_list = []
                     
                     if isinstance(data, dict):
-                        # Estructura 1: {"Data": [...], "summary": [...]}
+                        # Structure 1: {"Data": [...], "summary": [...]}
                         if "Data" in data and isinstance(data["Data"], list):
                             data_list = data["Data"]
-                        # Estructura 2: {"data": [...]}
+                        # Structure 2: {"data": [...]}
                         elif "data" in data and isinstance(data["data"], list):
                             data_list = data["data"]
-                        # Estructura 3: {"results": [...]}
+                        # Structure 3: {"results": [...]}
                         elif "results" in data and isinstance(data["results"], list):
                             data_list = data["results"]
                     elif isinstance(data, list):
-                        # Estructura 4: directamente una lista
+                        # Structure 4: directly a list
                         data_list = data
                     
-                    logger.info(f"  Registros encontrados: {len(data_list)}")
+                    logger.info(f" Records found: {len(data_list)}")
                     
                     if len(data_list) == 0:
-                        logger.debug(f"  Respuesta completa: {json.dumps(data, indent=4)[:1000]}")
+                        logger.debug(f" Full response: {json.dumps(data, indent=4)[:1000]}")
                         continue
                     
                     # ============================================
-                    # PROCESAR DATOS
+                    # PROCESS DATA
                     # ============================================
-                    logger.info(f"  Datos encontrados. Procesando...")
-                    logger.debug(f"  Estructura del primer registro: {json.dumps(data_list[0], indent=6)[:500]}")
+                    logger.info(f" Data found!")
+                    logger.debug(f" Structure of the first record:")
+                    logger.debug(f" {json.dumps(data_list[0], indent=6)[:1500]}")
+                    
+                    logger.debug(f" Available keys in the record: {list(data_list[0].keys())}")
                     
                     saved_count = 0
                     
                     for record in data_list:
-                        # Extraer timestamp del registro
-                        timestamp = None
-                        for key in ["timestamp", "date", "Timestamp", "Date", "dateTime", "DateTime", "time"]:
-                            if key in record:
-                                timestamp = record[key]
-                                break
+                        # Extract timestamp from the 'datetime' field of each record
+                        datetime_str = record.get("datetime", "").strip()
                         
-                        if timestamp is None:
+                        # Skip records that are metadata
+                        if datetime_str in ["Minimum", "Maximum", "Average", "Avg", "Summary:", 
+                                             "MinDate", "MaxDate", "MinTime", "MaxTime", "Num", 
+                                             "DataPrecent", "STD", ""]:
+                            logger.debug(f" Skipping metadata record: {datetime_str}")
+                            continue
+                        
+                        # Use parse_rmcab_timestamp to parse correctly
+                        try:
+                            timestamp = parse_rmcab_timestamp(datetime_str, "America/Bogota")
+                            logger.debug(f" Parsed: {datetime_str} -> {timestamp}")
+                        except Exception as e:
+                            logger.warning(f" Error parsing datetime '{datetime_str}': {e}")
                             timestamp = now
-                        elif isinstance(timestamp, str):
-                            try:
-                                # Intentar parsear como ISO
-                                timestamp = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
-                                # Asegurar que tiene zona horaria
-                                if timestamp.tzinfo is None:
-                                    timestamp = tz.localize(timestamp)
-                            except:
-                                try:
-                                    # Intentar otros formatos comunes
-                                    timestamp = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
-                                    timestamp = tz.localize(timestamp)
-                                except:
-                                    timestamp = now
-                        elif isinstance(timestamp, (int, float)):
-                            # Si es un timestamp Unix o .NET ticks
-                            if timestamp > 10_000_000_000:  # Probablemente .NET ticks
-                                from app.utils.rmcab_utils import ticks_to_iso
-                                timestamp_str = ticks_to_iso(timestamp, str(tz))
-                                timestamp = datetime.fromisoformat(timestamp_str)
-                                # Asegurar que tiene zona horaria
-                                if timestamp.tzinfo is None:
-                                    timestamp = tz.localize(timestamp)
-                            else:  # Unix timestamp
-                                timestamp = datetime.fromtimestamp(timestamp, tz=tz)
                         
-                        # Asegurar que siempre tenga zona horaria
-                        if timestamp.tzinfo is None:
-                            timestamp = tz.localize(timestamp)
-                        
-                        logger.debug(f"  Timestamp: {timestamp}")
-                        
-                        # Procesar cada campo del registro que coincida con un monitor
+                        # Process each field in the record that matches a monitor
                         for key, value in record.items():
-                            # Skip campos de metadatos
-                            if key.lower() in ["timestamp", "date", "datetime", "time", "count", "id", "stationid", "total", "skip", "take"]:
+                            # Skip metadata fields
+                            if key.lower() in ["timestamp", "date", "datetime", "time", "count", "id", "stationid"]:
                                 continue
                             
-                            # Buscar el monitor correspondiente
+                            # Find the corresponding monitor
                             monitor = None
                             
-                            # Búsqueda 1: Por código exacto
+                            # Search 1: By exact code
                             if key in monitor_dict:
                                 monitor = monitor_dict[key]
                             
-                            # Búsqueda 2: Por código sin prefijo (ej: "S_27_1" -> "1")
+                            # Search 2: By code without prefix
                             if monitor is None:
                                 for code, mon in monitor_dict.items():
                                     if key.endswith(code.split('_')[-1]):
@@ -215,36 +194,51 @@ def fetch_reports_job():
                                         break
                             
                             if monitor is None:
-                                logger.debug(f"  Monitor no encontrado para código: {key}")
+                                logger.debug(f" Monitor not found for code: {key}")
                                 continue
                             
-                            # Validar y convertir valor
+                            # Validate and convert value
                             if value is None or value == "":
                                 continue
                             
-                            # Convertir a string para validación
                             value_str = str(value).strip()
                             
-                            # Skip valores inválidos comunes
+                            # Skip common invalid values
                             if value_str in ["----", "-", "N/A", "NA", "null", "None"]:
                                 continue
                             
-                            # Skip si parece una fecha/hora
-                            if (("-" in value_str and any(c.isdigit() for c in value_str) and value_str.count("-") >= 2) or ":" in value_str):
-                                logger.debug(f"  Saltando valor tipo fecha/hora para {key}: {value_str}")
+                            # Skip if it looks like a date
+                            if "-" in value_str and any(c.isdigit() for c in value_str):
+                                if value_str.count("-") >= 2 or ":" in value_str:
+                                    logger.debug(f" Skipping date/time value for {key}: {value_str}")
+                                    continue
+                            
+                            # Skip if it contains ":"
+                            if ":" in value_str:
+                                logger.debug(f" Skipping time value for {key}: {value_str}")
                                 continue
                             
                             try:
                                 float_value = float(value_str)
                                 
-                                # Validar que el valor sea razonable (opcional)
+                                # Validate that the value is reasonable
                                 if float_value < -999999 or float_value > 999999:
-                                    logger.warning(f"  Valor fuera de rango para {key}: {float_value}")
+                                    logger.warning(f" Value out of range for {key}: {float_value}")
                                     continue
                                 
-                                logger.debug(f"  Valor {monitor.type}: {float_value} {monitor.unit}")
+                                logger.debug(f" -> {monitor.type}: {float_value} {monitor.unit}")
                                 
-                                # Crear registro de sensor
+                                # Check if the sensor already exists (avoid duplicates)
+                                existing_sensor = db.query(Sensor).filter(
+                                    Sensor.monitor_id == monitor.id,
+                                    Sensor.timestamp == timestamp
+                                ).first()
+                                
+                                if existing_sensor:
+                                    logger.debug(f" Sensor already exists (ID: {existing_sensor.id}), skipping...")
+                                    continue
+                                
+                                # Create sensor record only if it doesn't exist
                                 new_sensor = Sensor(
                                     monitor_id=monitor.id,
                                     timestamp=timestamp,
@@ -254,45 +248,79 @@ def fetch_reports_job():
                                 saved_count += 1
                                 
                             except (ValueError, TypeError) as e:
-                                logger.warning(f"  Error convirtiendo valor {key}={value}: {e}")
+                                logger.warning(f" Error converting value {key}={value}: {e}")
                             
-                    # Guardar en la base de datos
+                    # Save to database
                     if saved_count > 0:
                         db.commit()
-                        logger.info(f"  {saved_count} sensores guardados exitosamente")
+                        logger.info(f" {saved_count} sensors saved successfully")
                         data_found = True
                     else:
-                        logger.warning(f"  No se guardaron sensores (sin coincidencias de código)")
-                        # Solo mostrar los códigos si data_list no está vacío
-                        if data_list:
-                            logger.debug(f"  Códigos en respuesta: {[k for k in data_list[0].keys() if k not in ['timestamp', 'date', 'count']]}")
-                            logger.debug(f"  Códigos esperados: {list(monitor_dict.keys())}")
+                        logger.warning(f" No sensors were saved (no code matches)")
 
                 except requests.exceptions.Timeout:
-                    logger.error(f"  Timeout en petición para {config['name']}")
+                    logger.error(f" Timeout on request for {config['name']}")
                 except requests.exceptions.RequestException as e:
-                    logger.error(f"  Error de red o solicitud: {str(e)}")
+                    logger.error(f" Network error: {str(e)}")
                 except json.JSONDecodeError as e:
-                    logger.error(f"  Error parseando JSON: {str(e)}")
-                    if 'response' in locals() and response.text:
-                        logger.debug(f"  Respuesta: {response.text[:500]}")
+                    logger.error(f" Error parsing JSON: {str(e)}")
+                    logger.debug(f" Response: {response.text[:500]}")
                 except Exception as e:
-                    logger.exception(f"  Error procesando {config['name']}: {str(e)}")
+                    logger.exception(f" Error processing {config['name']}: {str(e)}")
                     db.rollback()
             
             if not data_found:
-                logger.warning(f"No se encontraron datos para {station.name} en ningún rango de tiempo.")
+                logger.warning(f"No data found for {station.name} in any time range")
 
     except Exception as e:
-        logger.error(f"Error general en fetch_reports_job: {str(e)}")
-        logger.exception("Stack trace completo:")
+        logger.error(f"General error in fetch_reports_job: {str(e)}")
+        logger.exception("Full stack trace:")
         db.rollback()
     finally:
         db.close()
 
-    logger.info("\nTarea completada\n")
+    logger.info("\nTask completed\n")
+
+def log_execution_summary():
+    """
+    Logs an execution summary to a log file for auditing.
+    """
+    import os
+    
+    db = SessionLocal()
+    try:
+        total_sensors = db.query(Sensor).count()
+        total_monitors = db.query(Monitor).count()
+        total_stations = db.query(Station).count()
+        
+        # Get timestamp of the last inserted sensor
+        last_sensor = db.query(Sensor).order_by(Sensor.id.desc()).first()
+        last_timestamp = last_sensor.timestamp if last_sensor else None
+        
+        log_file = "logs/fetch_summary.log"
+        os.makedirs("logs", exist_ok=True)
+        
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write(f"\n{'='*80}\n")
+            f.write(f"Execution: {datetime.now(pytz.timezone('America/Bogota')).strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"Total Sensors in DB: {total_sensors}\n")
+            f.write(f"Total Monitors: {total_monitors}\n")
+            f.write(f"Total Stations: {total_stations}\n")
+            f.write(f"Last inserted sensor: {last_timestamp}\n")
+            f.write(f"{'='*80}\n")
+        
+        logger.info(f"DB Summary:")
+        logger.info(f" - Total Sensors: {total_sensors}")
+        logger.info(f" - Total Monitors: {total_monitors}")
+        logger.info(f" - Total Stations: {total_stations}")
+        logger.info(f" - Last timestamp: {last_timestamp}")
+        
+    finally:
+        db.close()
 
     
 if __name__ == "__main__":
-    print("Ejecutando fetch_reports_job manualmente...")
+    print("Running fetch_reports_job manually...")
     fetch_reports_job()
+    log_execution_summary()
+    print("\nCheck logs/fetch_summary.log for execution history")
