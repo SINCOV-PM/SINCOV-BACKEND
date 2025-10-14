@@ -1,53 +1,92 @@
-# app/utils/rmcab_utils.py
 import json
-from datetime import datetime, timezone
+import re
+from datetime import datetime, timezone, timedelta
 import pytz
 
 
-# Epoch de .NET: 0001-01-01 00:00:00 UTC
-# Ticks desde ese momento (100 nanosegundos por tick)
+# .NET Epoch: 0001-01-01 00:00:00 UTC
+# Ticks since that moment (100 nanoseconds per tick)
 DOTNET_EPOCH = datetime(1, 1, 1, tzinfo=timezone.utc)
+
+# Regex to detect dd-mm-YYYY HH:MM format
+DT_RE = re.compile(r"(\d{2})-(\d{2})-(\d{4})\s+(\d{2}):(\d{2})")
+
+
+def normalize_datetime_string(s: str) -> str:
+    """
+    Converts 'dd-mm-YYYY 24:MM' -> 'dd-mm-YYYY+1 00:MM'.
+    If it's a normal hour (00–23), it remains the same.
+    If it does not match the pattern, it returns as is.
+    
+    Args:
+        s: Date/time string in dd-mm-YYYY HH:MM format
+    
+    Returns:
+        Normalized string
+    
+    Example:
+        >>> normalize_datetime_string("10-10-2025 24:00")
+        "11-10-2025 00:00"
+    """
+    m = DT_RE.fullmatch(s)
+    if not m:
+        return s
+    
+    d, mo, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    h, mi = int(m.group(4)), int(m.group(5))
+    
+    if h == 24:
+        # Move to the next day with 00:MM
+        dt = datetime(y, mo, d, 0, mi) + timedelta(days=1)
+    else:
+        dt = datetime(y, mo, d, h, mi)
+    
+    return dt.strftime("%d-%m-%Y %H:%M")
 
 
 def to_dotnet_ticks(dt_str, tz_str="America/Bogota"):
     """
-    Convierte una fecha ISO string a .NET ticks.
+    Converts an ISO date string to .NET ticks.
     
     Args:
-        dt_str: Fecha en formato ISO (ej: "2025-10-10T00:00:00")
-        tz_str: Timezone (ej: "America/Bogota")
+        dt_str: Date in ISO format (e.g., "2025-10-10T00:00:00")
+        tz_str: Timezone (e.g., "America/Bogota")
     
     Returns:
         int: .NET ticks
     
-    Ejemplo:
+    Example:
         >>> to_dotnet_ticks("2025-10-10T00:00:00", "America/Bogota")
         638641440000000000
     """
     tz = pytz.timezone(tz_str)
     
-    # Parse la fecha string
+    # Parse the date string
     if isinstance(dt_str, str):
-        # Intentar con fromisoformat primero
+        # Try fromisoformat first
         try:
             dt = datetime.fromisoformat(dt_str.replace('Z', '+00:00'))
         except:
-            # Fallback a formato manual
-            dt = datetime.strptime(dt_str, "%Y-%m-%dT%H:%M:%S")
+            try:
+                # Fallback to manual format
+                dt = datetime.strptime(dt_str, "%Y-%m-%dT%H:%M:%S")
+            except:
+                # Alternative format YYYY-MM-DD HH:MM
+                dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M")
     else:
         dt = dt_str
     
-    # Si no tiene timezone, asignar la especificada
+    # If it has no timezone, assign the specified one
     if dt.tzinfo is None:
         dt = tz.localize(dt)
     
-    # Convertir a UTC
+    # Convert to UTC
     dt_utc = dt.astimezone(timezone.utc)
     
-    # Calcular diferencia desde epoch de .NET
+    # Calculate difference from .NET epoch
     delta = dt_utc - DOTNET_EPOCH
     
-    # Convertir a ticks (1 tick = 100 nanosegundos = 0.1 microsegundos)
+    # Convert to ticks (1 tick = 100 nanoseconds = 0.1 microseconds)
     ticks = int(delta.total_seconds() * 10_000_000)
     
     return ticks
@@ -55,65 +94,139 @@ def to_dotnet_ticks(dt_str, tz_str="America/Bogota"):
 
 def ticks_to_iso(ticks, tz_str="America/Bogota"):
     """
-    Convierte .NET ticks a fecha ISO string en timezone especificado.
+    Converts .NET ticks to ISO date string in the specified timezone.
     
     Args:
         ticks: .NET ticks (int)
-        tz_str: Timezone (ej: "America/Bogota")
+        tz_str: Timezone (e.g., "America/Bogota")
     
     Returns:
-        str: Fecha en formato ISO
+        str: Date in ISO format
     """
     tz = pytz.timezone(tz_str)
     
-    # Convertir ticks a segundos
+    # Convert ticks to seconds
     seconds = ticks / 10_000_000
     
-    # Crear datetime desde epoch de .NET
-    dt_utc = DOTNET_EPOCH + datetime.timedelta(seconds=seconds)
+    # Create datetime from .NET epoch
+    dt_utc = DOTNET_EPOCH + timedelta(seconds=seconds)
     
-    # Convertir al timezone especificado
+    # Convert to the specified timezone
     dt_local = dt_utc.astimezone(tz)
     
     return dt_local.isoformat()
 
 
-def dumps_list_as_string(data_list):
+def parse_rmcab_timestamp(value, tz_str="America/Bogota"):
     """
-    Convierte una lista a JSON string sin espacios (formato compacto).
+    Parses different timestamp formats that RMCAB can return.
     
     Args:
-        data_list: Lista de Python
+        value: Timestamp value (str, int, float, or datetime)
+        tz_str: Timezone to localize naive dates
+    
+    Returns:
+        datetime: Timezone-aware datetime object
+    
+    Handles:
+        - ISO 8601: "2025-10-10T12:00:00" or "2025-10-10T12:00:00Z"
+        - dd-mm-YYYY HH:MM format (including 24 hour)
+        - .NET ticks (large numbers)
+        - Unix timestamps
+    """
+    tz = pytz.timezone(tz_str)
+    
+    if value is None:
+        return datetime.now(tz)
+    
+    # If it's already a datetime object
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return tz.localize(value)
+        return value
+    
+    # If it's a string
+    if isinstance(value, str):
+        # Normalize 24:00 hour if it exists
+        if "24:" in value:
+            value = normalize_datetime_string(value)
+        
+        try:
+            # Try ISO 8601
+            dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
+            if dt.tzinfo is None:
+                dt = tz.localize(dt)
+            return dt
+        except:
+            try:
+                # dd-mm-YYYY HH:MM format
+                dt = datetime.strptime(value, "%d-%m-%Y %H:%M")
+                return tz.localize(dt)
+            except:
+                try:
+                    # YYYY-MM-DD HH:MM:SS format
+                    dt = datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+                    return tz.localize(dt)
+                except:
+                    try:
+                        # YYYY-MM-DD HH:MM format
+                        dt = datetime.strptime(value, "%Y-%m-%d %H:%M")
+                        return tz.localize(dt)
+                    except:
+                        # If parsing fails, return now
+                        return datetime.now(tz)
+    
+    # If it's a number (Unix timestamp or .NET ticks)
+    if isinstance(value, (int, float)):
+        if value > 630000000000000000:  # .NET ticks
+            timestamp_str = ticks_to_iso(value, tz_str)
+            dt = datetime.fromisoformat(timestamp_str)
+            if dt.tzinfo is None:
+                dt = tz.localize(dt)
+            return dt
+        elif value > 1000000000:  # Unix timestamp
+            return datetime.fromtimestamp(value, tz=tz)
+    
+    # Fallback: return now
+    return datetime.now(tz)
+
+
+def dumps_list_as_string(data_list):
+    """
+    Converts a list to a JSON string without spaces (compact format).
+    
+    Args:
+        data_list: Python list
     
     Returns:
         str: JSON string
     
-    Ejemplo:
+    Example:
         >>> dumps_list_as_string([1, 2, 3])
         '[1,2,3]'
     """
-    return json.dumps(data_list, separators=(',', ':'))
+    return json.dumps(data_list, separators=(',', ':'), ensure_ascii=False)
 
 
 def build_rmcab_params(station_id, station_name, monitor_ids, 
                        from_ticks, to_ticks, granularity_minutes,
                        report_type="Average", take=0, page_size=0):
     """
-    Construye los parámetros para la API de RMCAB.
+    Builds the parameters for the RMCAB API request.
     
     Args:
-        station_id: ID de la estación (int)
-        station_name: Nombre de la estación (str)
-        monitor_ids: Lista de IDs de monitores (list)
-        from_ticks: Fecha inicio en .NET ticks (int)
-        to_ticks: Fecha fin en .NET ticks (int)
-        granularity_minutes: Granularidad en minutos (int)
-        report_type: Tipo de reporte (str, default "Average")
-        take: Parámetro take (int, default 0)
-        page_size: Tamaño de página (int, default 0)
+        station_id: Station ID (int)
+        station_name: Station name (str)
+        monitor_ids: List of monitor IDs (list)
+        from_ticks: Start date in .NET ticks (int)
+        to_ticks: End date in .NET ticks (int)
+        granularity_minutes: Granularity in minutes (int)
+        report_type: Report type (str, default "Average")
+        take: Take parameter (int, default 0)
+        page_size: Page size (int, default 0)
     
     Returns:
-        dict: Diccionario de parámetros para requests
+        dict: Dictionary of parameters for requests
     """
     tb_str = str(granularity_minutes)
     tb_list = [tb_str]
