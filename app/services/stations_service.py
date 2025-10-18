@@ -129,11 +129,11 @@ def get_station_detail(station_id: int):
 
 def get_stations_summary():
     """
-    Retrieves a summary of all stations, including aggregated statistics 
-    (total measurements, avg, min, max value) and last measurement timestamp.
+    Retrieves a summary of all stations, grouped by monitor type,
+    including aggregated statistics per monitor type.
     
     Returns:
-        dict: Summary with statistics per station.
+        list: Summary with statistics per station and monitor type.
     """
     db = SessionLocal()
     try:
@@ -143,6 +143,8 @@ def get_stations_summary():
                 st.name,
                 st.latitude,
                 st.longitude,
+                m.type as monitor_type,
+                m.unit as monitor_unit,
                 COUNT(DISTINCT s.id) as total_mediciones,
                 ROUND(AVG(s.value)::numeric, 2) as promedio,
                 MIN(s.value) as minimo,
@@ -151,26 +153,37 @@ def get_stations_summary():
             FROM sensors s
             JOIN monitors m ON s.monitor_id = m.id
             JOIN stations st ON m.station_id = st.id
-            GROUP BY st.id, st.name, st.latitude, st.longitude
-            ORDER BY st.id
+            GROUP BY st.id, st.name, st.latitude, st.longitude, m.type, m.unit
+            ORDER BY st.id, m.type
         """)).fetchall()
         
-        # Format the aggregated results
-        summary = [
-            {
-                "id": row[0],
-                "name": row[1],
-                "lat": row[2],
-                "lng": row[3],
-                "total_mediciones": row[4],
-                # Safely convert aggregated values to float, defaulting to 0
-                "promedio": float(row[5]) if row[5] else 0,
-                "minimo": float(row[6]) if row[6] else 0,
-                "maximo": float(row[7]) if row[7] else 0,
-                "ultima_medicion": row[8]
-            }
-            for row in result
-        ]
+        # Group by station
+        stations_dict = {}
+        
+        for row in result:
+            station_id = row[0]
+            
+            if station_id not in stations_dict:
+                stations_dict[station_id] = {
+                    "id": row[0],
+                    "name": row[1],
+                    "lat": row[2],
+                    "lng": row[3],
+                    "monitors": []
+                }
+            
+            # Add monitor data
+            stations_dict[station_id]["monitors"].append({
+                "type": row[4],
+                "unit": row[5],
+                "total_mediciones": row[6],
+                "promedio": float(row[7]) if row[7] else 0,
+                "minimo": float(row[8]) if row[8] else 0,
+                "maximo": float(row[9]) if row[9] else 0,
+                "ultima_medicion": row[10]
+            })
+        
+        summary = list(stations_dict.values())
         
         logger.info(f"Retrieved summary for {len(summary)} stations")
         return summary
