@@ -15,9 +15,9 @@ app.add_middleware(
 )
 
 # Include API routers
-app.include_router(routes_predict.router)
-app.include_router(routes_reports.router)
-app.include_router(routes_stations.router)
+app.include_router(routes_predict.router, prefix="/predict", tags=["predict"])
+app.include_router(routes_reports.router, prefix="/reports", tags=["reports"])
+app.include_router(routes_stations.router, prefix="/stations", tags=["stations"])
 
 # Global variable to hold the scheduler instance
 scheduler = None
