@@ -14,16 +14,28 @@ from app.utils.rmcab_utils import to_dotnet_ticks, build_rmcab_params, parse_rmc
 class FetchJobLogger:
     """Centralized logger for fetch operations with structured formatting"""
     
+    _instance = None
+    _initialized = False
+    
+    def __new__(cls, name: str = __name__):
+        """Singleton pattern to avoid multiple handler attachments"""
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+    
     def __init__(self, name: str = __name__):
-        self.logger = logging.getLogger(name)
-        self._setup_logger()
+        """Initialize logger only once"""
+        if not FetchJobLogger._initialized:
+            self.logger = logging.getLogger(name)
+            self._setup_logger()
+            FetchJobLogger._initialized = True
     
     def _setup_logger(self):
         """Configure logger with custom formatting"""
         if not self.logger.handlers:
             handler = logging.StreamHandler()
             formatter = logging.Formatter(
-                "%(asctime)s [%(levelname)s] %(message)s",
+                "%(asctime)s [%(levelname)-8s] %(message)s",
                 datefmt="%Y-%m-%d %H:%M:%S"
             )
             handler.setFormatter(formatter)
@@ -32,9 +44,10 @@ class FetchJobLogger:
     
     def section_header(self, title: str):
         """Log a section header"""
-        self.logger.info(f"\n{'='*80}")
+        separator = "=" * 80
+        self.logger.info(f"\n{separator}")
         self.logger.info(title)
-        self.logger.info(f"{'='*80}")
+        self.logger.info(separator)
     
     def station_processing(self, station_name: str, rmcab_id: str):
         """Log station processing start"""
@@ -42,38 +55,47 @@ class FetchJobLogger:
     
     def monitors_found(self, count: int):
         """Log monitors found"""
-        self.logger.info(f"✓ {count} monitors configured")
+        self.logger.info(f"Found {count} monitors configured")
     
     def time_range(self, config_name: str, from_time: datetime, to_time: datetime):
         """Log time range being tested"""
-        self.logger.info(f"→ Testing range: {config_name}")
-        self.logger.debug(f"  From: {from_time.strftime('%Y-%m-%d %H:%M:%S')}")
-        self.logger.debug(f"  To: {to_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        self.logger.info(f"Testing range: {config_name}")
+        self.logger.debug(f"From: {from_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        self.logger.debug(f"To: {to_time.strftime('%Y-%m-%d %H:%M:%S')}")
     
     def api_response(self, status_code: int, records_count: int):
         """Log API response"""
-        status_icon = "✓" if status_code == 200 else "✗"
-        self.logger.info(f"{status_icon} Status: {status_code} | Records: {records_count}")
+        level = logging.INFO if status_code == 200 else logging.WARNING
+        self.logger.log(level, f"API Response - Status: {status_code} | Records: {records_count}")
     
     def data_saved(self, count: int):
         """Log successful data save"""
-        self.logger.info(f"✓ {count} sensors saved successfully")
+        self.logger.info(f"Successfully saved {count} sensor records")
     
     def warning(self, message: str):
-        """Log warning"""
-        self.logger.warning(f"⚠ {message}")
+        """Log warning message"""
+        self.logger.warning(message)
     
     def error(self, message: str, exception: Optional[Exception] = None):
-        """Log error"""
-        self.logger.error(f"✗ {message}")
+        """Log error message with optional exception"""
+        self.logger.error(message)
         if exception:
-            self.logger.exception("Full stack trace:")
+            self.logger.exception("Exception details:")
     
     def task_complete(self):
         """Log task completion"""
-        self.logger.info("\n" + "="*80)
-        self.logger.info("Task completed")
-        self.logger.info("="*80 + "\n")
+        separator = "=" * 80
+        self.logger.info(f"\n{separator}")
+        self.logger.info("Task completed successfully")
+        self.logger.info(f"{separator}\n")
+    
+    def info(self, message: str):
+        """Log info message"""
+        self.logger.info(message)
+    
+    def debug(self, message: str):
+        """Log debug message"""
+        self.logger.debug(message)
 
 
 class RMCABDataFetcher:
@@ -350,7 +372,7 @@ def fetch_reports_job():
     
     try:
         stations = db.query(Station).all()
-        logger.logger.info(f"Found {len(stations)} stations in database")
+        logger.info(f"Found {len(stations)} stations in database")
         
         for station in stations:
             monitors = db.query(Monitor).filter(
@@ -386,10 +408,10 @@ def log_execution_summary():
         last_timestamp = last_sensor.timestamp if last_sensor else None
         
         logger.section_header("Database Summary")
-        logger.logger.info(f"Total Sensors: {total_sensors}")
-        logger.logger.info(f"Total Monitors: {total_monitors}")
-        logger.logger.info(f"Total Stations: {total_stations}")
-        logger.logger.info(f"Last timestamp: {last_timestamp}")
+        logger.info(f"Total Sensors: {total_sensors}")
+        logger.info(f"Total Monitors: {total_monitors}")
+        logger.info(f"Total Stations: {total_stations}")
+        logger.info(f"Last timestamp: {last_timestamp}")
         
     finally:
         db.close()
