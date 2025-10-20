@@ -3,12 +3,12 @@ Integration tests for API endpoints.
 """
 from fastapi.testclient import TestClient
 from app.main import app
-import pytest
 
 client = TestClient(app)
 
 
 def test_predict():
+    """Test ML prediction endpoint."""
     response = client.post("/predict/", json={"features": [22.5, 60, 1012]})
     assert response.status_code == 200
     assert "prediction" in response.json()
@@ -19,16 +19,16 @@ def test_predict():
 # ============================================================================
 
 def test_stations_endpoint():
-    """Verifica que el endpoint de estaciones funcione correctamente."""
+    """Test that the stations endpoint works correctly."""
     response = client.get("/stations/")
-    assert response.status_code in [200, 404]  # Acepta 404 si no hay datos
+    assert response.status_code in [200, 404]  # Accept 404 if no data
     
     if response.status_code == 200:
         data = response.json()
         assert "stations" in data
         assert isinstance(data["stations"], list)
         
-        # Si hay estaciones, verificar estructura
+        # If there are stations, verify structure
         if len(data["stations"]) > 0:
             station = data["stations"][0]
             assert "id" in station
@@ -40,7 +40,7 @@ def test_stations_endpoint():
 
 
 def test_stations_summary_endpoint():
-    """Verifica el resumen de estaciones con todos los monitores."""
+    """Test stations summary with all monitors."""
     response = client.get("/stations/summary/all")
     assert response.status_code in [200]
     
@@ -50,7 +50,7 @@ def test_stations_summary_endpoint():
         assert "data" in data
         assert isinstance(data["data"], list)
         
-        # Si hay datos, verificar estructura
+        # If there is data, verify structure
         if len(data["data"]) > 0:
             station = data["data"][0]
             assert "id" in station
@@ -60,7 +60,7 @@ def test_stations_summary_endpoint():
             assert "monitors" in station
             assert isinstance(station["monitors"], list)
             
-            # Verificar estructura de monitores
+            # Verify monitor structure
             if len(station["monitors"]) > 0:
                 monitor = station["monitors"][0]
                 assert "type" in monitor
@@ -72,8 +72,8 @@ def test_stations_summary_endpoint():
 
 
 def test_station_detail_endpoint():
-    """Verifica el detalle de una estación específica."""
-    # Primero obtener una estación válida
+    """Test detail for a specific station."""
+    # First get a valid station
     stations_response = client.get("/stations/")
     
     if stations_response.status_code == 200:
@@ -82,7 +82,7 @@ def test_station_detail_endpoint():
         if len(stations_data["stations"]) > 0:
             station_id = stations_data["stations"][0]["id"]
             
-            # Probar el endpoint de detalle
+            # Test detail endpoint
             response = client.get(f"/stations/{station_id}")
             assert response.status_code in [200, 404]
             
@@ -93,7 +93,7 @@ def test_station_detail_endpoint():
                 assert "sensors" in data
                 assert isinstance(data["sensors"], list)
                 
-                # Verificar estructura de sensores
+                # Verify sensor structure
                 if len(data["sensors"]) > 0:
                     sensor = data["sensors"][0]
                     assert "id" in sensor
@@ -109,9 +109,9 @@ def test_station_detail_endpoint():
 # ============================================================================
 
 def test_reports_endpoint():
-    """Verifica el endpoint principal de reportes."""
-    response = client.get("/reports/")  # ✅ Agregada barra final
-    assert response.status_code in [200, 404]  # ✅ Acepta 404 si no hay datos
+    """Test main reports endpoint."""
+    response = client.get("/reports/")
+    assert response.status_code in [200, 404]  # Accept 404 if no data
     
     if response.status_code == 200:
         data = response.json()
@@ -120,7 +120,7 @@ def test_reports_endpoint():
         assert "reports" in data
         assert isinstance(data["reports"], list)
         
-        # Si hay reportes, verificar estructura
+        # If there are reports, verify structure
         if len(data["reports"]) > 0:
             report = data["reports"][0]
             assert "station_id" in report
@@ -132,15 +132,15 @@ def test_reports_endpoint():
             assert "timestamp" in report
             assert "date" in report
             
-            # Verificar que el status sea válido
+            # Verify that status is valid
             valid_statuses = ["Bueno", "Moderado", "Alto", "Muy Alto", "Peligroso"]
             assert report["status"] in valid_statuses
 
 
 def test_reports_summary_endpoint():
-    """Verifica el resumen estadístico de reportes."""
+    """Test reports summary statistics."""
     response = client.get("/reports/summary")
-    assert response.status_code in [200, 404]  # ✅ Acepta 404 si no hay datos
+    assert response.status_code in [200, 404]  # Accept 404 if no data
     
     if response.status_code == 200:
         data = response.json()
@@ -154,11 +154,11 @@ def test_reports_summary_endpoint():
         assert "max_pm25" in summary
         assert "status_distribution" in summary
         
-        # Verificar que los valores sean numéricos
+        # Verify that values are numeric
         assert isinstance(summary["total_stations"], int)
         assert isinstance(summary["avg_pm25"], (int, float))
         assert isinstance(summary["min_pm25"], (int, float))
         assert isinstance(summary["max_pm25"], (int, float))
         
-        # Verificar que status_distribution sea un dict
+        # Verify that status_distribution is a dict
         assert isinstance(summary["status_distribution"], dict)
