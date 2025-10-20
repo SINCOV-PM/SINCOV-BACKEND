@@ -84,7 +84,7 @@ jobs:
 
         env:
 
-          DATABASE_URL: postgresql+psycopg2://sincov_user:your_password@localhost:5432/sincov_db
+          DATABASE_URL: postgresql+psycopg2://sincov_user:testpass123@localhost:5432/sincov_db
 
         run: |
 
