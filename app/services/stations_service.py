@@ -64,6 +64,138 @@ def get_stations_pm25():
         db.close()
 
 
+def get_station_report_24h(station_id: int):
+    """
+    Retrieves a detailed 24-hour report for a specific station.
+    Includes statistics for PM2.5 and all other available monitors.
+    
+    Args:
+        station_id: ID of the station.
+        
+    Returns:
+        dict: Detailed report with 24h statistics for all monitors.
+        
+    Raises:
+        ValueError: If the station is not found.
+    """
+    db = SessionLocal()
+    try:
+        # Primero verificar que la estación existe y obtener info básica
+        station_info = db.execute(text("""
+            SELECT id, name, latitude, longitude
+            FROM stations
+            WHERE id = :station_id
+        """), {"station_id": station_id}).fetchone()
+        
+        if not station_info:
+            raise ValueError(f"Estación {station_id} no encontrada")
+        
+        # Obtener estadísticas de las últimas 24 horas para todos los monitores
+        # Nota: Ajusta el intervalo según tus necesidades (aquí uso 24 horas)
+        monitors_stats = db.execute(text("""
+            SELECT 
+                m.type as monitor_type,
+                m.unit as monitor_unit,
+                COUNT(s.id) as total_lecturas,
+                ROUND(AVG(s.value)::numeric, 2) as promedio_24h,
+                MIN(s.value) as minimo_24h,
+                MAX(s.value) as maximo_24h,
+                MAX(s.timestamp AT TIME ZONE 'America/Bogota')::text as ultima_lectura
+            FROM sensors s
+            JOIN monitors m ON s.monitor_id = m.id
+            WHERE m.station_id = :station_id
+                AND s.timestamp >= NOW() - INTERVAL '24 hours'
+            GROUP BY m.type, m.unit
+            ORDER BY m.type
+        """), {"station_id": station_id}).fetchall()
+        
+        # Calcular SMA (Simple Moving Average) de 4 horas para cada monitor
+        sma_results = db.execute(text("""
+            SELECT 
+                m.type as monitor_type,
+                ROUND(AVG(s.value)::numeric, 2) as sma_4h
+            FROM sensors s
+            JOIN monitors m ON s.monitor_id = m.id
+            WHERE m.station_id = :station_id
+                AND s.timestamp >= NOW() - INTERVAL '4 hours'
+            GROUP BY m.type
+        """), {"station_id": station_id}).fetchall()
+        
+        # Crear diccionario para SMA lookup
+        sma_dict = {row[0]: float(row[1]) if row[1] else 0 for row in sma_results}
+        
+        # Formatear los datos de monitores
+        monitors_data = []
+        pm25_data = None
+        
+        for row in monitors_stats:
+            monitor_type = row[0]
+            monitor_info = {
+                "type": monitor_type,
+                "unit": row[1],
+                "total_lecturas": row[2],
+                "promedio_24h": float(row[3]) if row[3] else 0,
+                "minimo_24h": float(row[4]) if row[4] else 0,
+                "maximo_24h": float(row[5]) if row[5] else 0,
+                "sma_4h": sma_dict.get(monitor_type, 0),
+                "ultima_lectura": row[6],
+                "tendencia": calculate_trend(
+                    float(row[3]) if row[3] else 0,
+                    sma_dict.get(monitor_type, 0)
+                )
+            }
+            
+            # Separar PM2.5 del resto
+            if monitor_type == "PM2.5":
+                pm25_data = monitor_info
+            else:
+                monitors_data.append(monitor_info)
+        
+        report = {
+            "station_id": station_info[0],
+            "station_name": station_info[1],
+            "lat": float(station_info[2]) if station_info[2] else 0,
+            "lng": float(station_info[3]) if station_info[3] else 0,
+            "pm25": pm25_data,
+            "other_monitors": monitors_data,
+            "report_timestamp": db.execute(text("SELECT NOW() AT TIME ZONE 'America/Bogota'")).scalar()
+        }
+        
+        logger.info(f"Generated 24h report for station {station_id}")
+        return report
+        
+    except Exception as e:
+        logger.error(f"Error generating report for station {station_id}: {e}")
+        raise
+    finally:
+        db.close()
+
+
+def calculate_trend(promedio: float, sma: float) -> str:
+    """
+    Calcula la tendencia basada en la comparación entre promedio y SMA.
+    
+    Args:
+        promedio: Promedio de 24h
+        sma: Media móvil de 4h
+        
+    Returns:
+        str: Descripción de la tendencia
+    """
+    if sma == 0 or promedio == 0:
+        return "Sin Datos"
+    
+    diferencia_porcentual = ((sma - promedio) / promedio) * 100
+    
+    if diferencia_porcentual > 10:
+        return "Tendencia al Alza"
+    elif diferencia_porcentual < -10:
+        return "Tendencia a la Baja"
+    elif abs(diferencia_porcentual) <= 10:
+        return "Estable"
+    else:
+        return "Variable"
+
 def get_station_detail(station_id: int):
     """
     Retrieves all sensor readings for a specific station, limited to 227 latest records.
