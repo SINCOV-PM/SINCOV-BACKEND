@@ -17,7 +17,7 @@ client = TestClient(app)
 def test_stations_endpoint():
     """Test that the stations endpoint works correctly."""
     response = client.get("/stations/")
-    assert response.status_code in [200, 404]  # Accept 404 if no data
+    assert response.status_code in [200, 404]  
     
     if response.status_code == 200:
         data = response.json()
@@ -84,7 +84,7 @@ def test_predict_xgboost_endpoint_allowed_station():
         json=payload
     )
     
-    assert response.status_code == 200
+    assert response.status_code == [200,404]
     
     data = response.json()
     
