@@ -50,7 +50,7 @@ def load_model(horizon: int = 1) -> xgb.Booster:
         booster = xgb.Booster()
         booster.load_model(path)
         _MODELS[horizon] = booster
-        logger.info(f"✅ Model loaded for horizon {horizon}h")
+        logger.info(f" Model loaded for horizon {horizon}h")
     
     return _MODELS[horizon]
 
@@ -85,10 +85,10 @@ def predict_one(features: dict, horizon: int = 1) -> float:
     
     # Clip negative values (PM2.5 cannot be negative)
     if prediction < 0:
-        logger.warning(f"⚠️ Negative prediction {prediction:.2f} for horizon {horizon}h, clipping to 0")
+        logger.warning(f" Negative prediction {prediction:.2f} for horizon {horizon}h, clipping to 0")
         prediction = 0.0
     
-    logger.debug(f"✅ Prediction for horizon {horizon}h: {prediction:.2f} µg/m³")
+    logger.debug(f" Prediction for horizon {horizon}h: {prediction:.2f} µg/m³")
     
     return prediction
 
@@ -143,11 +143,11 @@ def validate_features(features: dict) -> bool:
     extra = set(features.keys()) - set(FEATURE_ORDER)
     
     if missing:
-        logger.error(f"❌ Missing features: {missing}")
+        logger.error(f" Missing features: {missing}")
         return False
     
     if extra:
-        logger.warning(f"⚠️ Extra features (will be ignored): {extra}")
+        logger.warning(f" Extra features (will be ignored): {extra}")
     
     return True
 

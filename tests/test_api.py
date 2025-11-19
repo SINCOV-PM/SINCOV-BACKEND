@@ -7,11 +7,7 @@ from app.main import app
 client = TestClient(app)
 
 
-def test_predict():
-    """Test ML prediction endpoint."""
-    response = client.post("/predict/", json={"features": [22.5, 60, 1012]})
-    assert response.status_code == 200
-    assert "prediction" in response.json()
+
 
 
 # ============================================================================
@@ -70,6 +66,40 @@ def test_stations_summary_endpoint():
                 assert "maximo" in monitor
                 assert "ultima_medicion" in monitor
 
+def test_predict_xgboost_endpoint_allowed_station():
+    """
+    Verifica la ejecución exitosa del servicio de predicción XGBoost (POST /predict/).
+    Usa la estación 2 y el payload JSON requerido.
+    """
+    station_id = 2
+    
+    payload = {
+        "station_id": station_id,
+        "horizons": [1, 3, 6, 12] 
+    }
+    
+    
+    response = client.post(
+        "/predict/",
+        json=payload
+    )
+    
+    assert response.status_code == 200
+    
+    data = response.json()
+    
+    assert "success" in data
+    assert data["success"] is True
+    assert data["station_id"] == station_id
+    assert "predictions" in data
+    assert isinstance(data["predictions"], list)
+    assert len(data["predictions"]) == 4
+    
+    
+    first_prediction = data["predictions"][0]
+    assert "horizon" in first_prediction
+    assert "predicted_pm25" in first_prediction
+    assert "timestamp" in first_prediction
 
 def test_station_detail_endpoint():
     """Test detail for a specific station."""
