@@ -9,6 +9,21 @@ requests==2.32.5
 pytz==2025.2
 APScheduler==3.11.0
 
+pydantic-settings==2.11.0
+python-multipart==0.0.20
+requests==2.32.5
+pytz==2025.2  # For timezone handling
+APScheduler==3.11.0
+pytest>=8.3.3
+pytest-asyncio>=0.21.0
+
+# === HTTP Client for API Tests ===
+httpx>=0.27.2
+
+# === Environment Configuration ===
+python-dotenv==1.1.1
+
+
 # Core Testing Dependencies
 pytest>=8.3.3
 pytest-asyncio>=0.21.0
@@ -26,6 +41,3 @@ six==1.17.0
 tzdata==2025.2
 xgboost==3.1.1
 
-# Instalación editable del paquete del modelo
-# NOTA: Esta ruta DEBE ser relativa o la ruta completa donde se ejecuta pip install.
--e C:\\Users\\ASUS\\OneDrive\\Escritorio\\ProyectoSeb\\xgboost\\model-xgboost
