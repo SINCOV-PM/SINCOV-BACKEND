@@ -1,0 +1,10 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xgboost_model"
+version = "0.1.0"
+description = "XGBoost PM2.5 prediction models for SINCOV"
+authors = [{name = "SINCOV Team"}]
+dependencies = ["xgboost", "numpy", "pandas"]

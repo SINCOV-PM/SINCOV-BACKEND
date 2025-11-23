@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "prophet_predictor"
+version = "0.1.0"
+description = "Predictor basado en Prophet para PM2.5 entrenado en Spark"
+authors = [
+    { name = "SINCOV" }
+]
+requires-python = ">=3.8"
+
+dependencies = [
+    "prophet>=1.1.5",
+    "pandas>=1.5.0",
+    "numpy>=1.24.0"
+]
+
+[tool.setuptools.packages.find]
+where = ["."]

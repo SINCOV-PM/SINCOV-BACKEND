@@ -5,6 +5,9 @@ class Settings(BaseSettings):
     PROJECT_VERSION: str = "0.1.0"
     DATABASE_URL: str
 
-    model_config = SettingsConfigDict(env_file=".env")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        extra="ignore",
+    )
 
 settings = Settings()
