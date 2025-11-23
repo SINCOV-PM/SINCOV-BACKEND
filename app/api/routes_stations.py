@@ -1,10 +1,9 @@
-# app/api/routes_stations.py
 from fastapi import APIRouter, HTTPException
 from app.services.stations_service import (
     get_stations_pm25, 
     get_station_detail, 
     get_stations_summary,
-    get_station_report_24h  # 🆕 Nueva importación
+    get_station_report_24h
 )
 import logging
 
