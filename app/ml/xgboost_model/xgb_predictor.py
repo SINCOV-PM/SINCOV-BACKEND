@@ -1,177 +1,141 @@
 import os
-import xgboost as xgb
-import numpy as np
 import logging
+import numpy as np
+import xgboost as xgb
 
 logger = logging.getLogger(__name__)
 
-_MODELS = {}  # cache por horizonte
-
-VALID_HORIZONS = [1, 3, 6, 12]  # ← Agregar esta constante
-
-# ORDEN EXACTO de features según entrenamiento (modelo.py)
-# Este orden es CRÍTICO - NO cambiar
+# -----------------------------------------------------------------------------
+# Constants and global cache
+# -----------------------------------------------------------------------------
+VALID_HORIZONS = [1, 3, 6, 12]
 FEATURE_ORDER = [
-    "pm10",
-    "o3",
-    "precipitacion",
-    "temp",
-    "hr",
-    "vviento",
-    "dviento",
-    "no",
-    "no2",
-    "nox",
-    "co",
-    "rsolar",
-    "pm25_lag1",
-    "pm25_lag3",
-    "pm25_lag6",
-    "pm25_lag12",
-    "pm25_lag24"
+    "pm10", "o3", "precipitacion", "temp", "hr",
+    "vviento", "dviento", "no", "no2", "nox", "co",
+    "rsolar", "pm25_lag1", "pm25_lag3", "pm25_lag6",
+    "pm25_lag12", "pm25_lag24"
 ]
 
+_MODELS: dict[int, xgb.Booster] = {}  # cache per horizon
+
+# -----------------------------------------------------------------------------
+# Model Loading
+# -----------------------------------------------------------------------------
 def load_model(horizon: int = 1) -> xgb.Booster:
     """
-    Load the model for the given horizon (1, 3, 6, or 12 hours ahead).
+    Load and cache the XGBoost model for a given horizon (1, 3, 6, or 12 hours).
     """
-    global _MODELS
-    
     if horizon not in VALID_HORIZONS:
         raise ValueError(f"Invalid horizon {horizon}. Must be one of {VALID_HORIZONS}")
-    
+
     if horizon not in _MODELS:
         model_name = f"xgb_pm25_tplus{horizon}.json"
-        path = os.path.join(os.path.dirname(__file__), "models", model_name)
-        
-        if not os.path.exists(path):
-            raise FileNotFoundError(f"Model not found for {horizon}h: {path}")
-        
+        model_path = os.path.join(os.path.dirname(__file__), "models", model_name)
+
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"Model not found for {horizon}h: {model_path}")
+
         booster = xgb.Booster()
-        booster.load_model(path)
+        booster.load_model(model_path)
         _MODELS[horizon] = booster
-        logger.info(f" Model loaded for horizon {horizon}h")
-    
+        logger.info(f"Loaded XGBoost model for horizon {horizon}h")
+
     return _MODELS[horizon]
 
+# -----------------------------------------------------------------------------
+# Prediction
+# -----------------------------------------------------------------------------
 def predict_one(features: dict, horizon: int = 1) -> float:
     """
-    Predict PM2.5 value for the given horizon (hours ahead).
-    
-    IMPORTANT: Features will be automatically reordered to match training order.
+    Predict PM2.5 concentration for a single record at the specified horizon.
+    Automatically reorders features to match training order.
     """
+    if not validate_features(features):
+        raise ValueError("Invalid or missing features for prediction.")
+
     model = load_model(horizon)
-    
-    # CRITICAL: Reorder features to match training order
-    try:
-        ordered_values = [features[name] for name in FEATURE_ORDER]
-    except KeyError as e:
-        missing = str(e)
-        available = list(features.keys())
-        raise ValueError(
-            f"Missing feature {missing}. "
-            f"Expected: {FEATURE_ORDER}. "
-            f"Got: {available}"
-        )
-    
-    # Convert to numpy array (1 row, 17 columns)
-    values = np.array([ordered_values])
-    
-    # Create DMatrix WITHOUT feature_names (models don't have them)
-    dmat = xgb.DMatrix(values)
-    
-    # Predict
+    ordered_values = [features[name] for name in FEATURE_ORDER]
+    dmat = xgb.DMatrix(np.array([ordered_values]))
+
     prediction = float(model.predict(dmat)[0])
-    
-    # Clip negative values (PM2.5 cannot be negative)
-    if prediction < 0:
-        logger.warning(f" Negative prediction {prediction:.2f} for horizon {horizon}h, clipping to 0")
-        prediction = 0.0
-    
-    logger.debug(f" Prediction for horizon {horizon}h: {prediction:.2f} µg/m³")
-    
+    prediction = max(0.0, prediction)  # clip negatives
+    logger.debug(f"Prediction ({horizon}h): {prediction:.2f} µg/m³")
+
     return prediction
+
 
 def predict_batch(records: list[dict], horizon: int = 1) -> list[float]:
     """
-    Predict PM2.5 values for multiple records.
-    
-    IMPORTANT: Features will be automatically reordered to match training order.
+    Predict PM2.5 concentration for multiple records at a given horizon.
     """
-    model = load_model(horizon)
     if not records:
         return []
-    
-    # CRITICAL: Reorder all records
+
+    model = load_model(horizon)
+
     try:
-        matrix = []
-        for record in records:
-            ordered_values = [record[name] for name in FEATURE_ORDER]
-            matrix.append(ordered_values)
+        matrix = [[record[name] for name in FEATURE_ORDER] for record in records]
     except KeyError as e:
         raise ValueError(f"Missing feature in batch: {e}")
-    
-    # Create DMatrix WITHOUT feature_names
+
     dmat = xgb.DMatrix(np.array(matrix))
-    
-    # Predict
     predictions = model.predict(dmat).tolist()
-    
-    # Clip negative values
     predictions = [max(0.0, p) for p in predictions]
-    
-    logger.info(f"Batch prediction for {len(records)} records, horizon {horizon}h")
-    
+
+    logger.info(f"Batch prediction completed: {len(records)} samples, horizon={horizon}h")
     return predictions
 
-def predict_all_horizons(features: dict) -> dict[int, float]:
-    """Predict PM2.5 for all available horizons."""
-    predictions = {}
-    
+
+def predict_all_horizons(features: dict) -> dict[int, float | None]:
+    """
+    Predict PM2.5 concentration for all available horizons (1, 3, 6, 12h).
+    Returns a dictionary mapping horizon → predicted value or None if failed.
+    """
+    results: dict[int, float | None] = {}
     for horizon in VALID_HORIZONS:
         try:
-            predictions[horizon] = predict_one(features, horizon)
+            results[horizon] = predict_one(features, horizon)
         except Exception as e:
-            logger.error(f"Failed to predict for horizon {horizon}h: {e}")
-            predictions[horizon] = None
-    
-    return predictions
+            logger.error(f"Prediction failed for horizon {horizon}h: {e}")
+            results[horizon] = None
+    return results
 
+# -----------------------------------------------------------------------------
+# Validation and Metadata
+# -----------------------------------------------------------------------------
 def validate_features(features: dict) -> bool:
-    """Validate that all required features are present."""
-    missing = set(FEATURE_ORDER) - set(features.keys())
-    extra = set(features.keys()) - set(FEATURE_ORDER)
-    
+    """
+    Check if the provided feature dictionary has all required inputs.
+    """
+    missing = set(FEATURE_ORDER) - set(features)
+    extra = set(features) - set(FEATURE_ORDER)
+
     if missing:
-        logger.error(f" Missing features: {missing}")
+        logger.error(f"Missing features: {missing}")
         return False
-    
     if extra:
-        logger.warning(f" Extra features (will be ignored): {extra}")
-    
+        logger.warning(f"Extra features ignored: {extra}")
+
     return True
 
-def get_feature_order() -> list:
-    """Get the expected feature order."""
+
+def get_feature_order() -> list[str]:
+    """Return the expected order of features for model input."""
     return FEATURE_ORDER.copy()
 
+
 def get_model_info(horizon: int) -> dict:
-    """Get metadata about a loaded model."""
+    """Return metadata for a given model horizon."""
     try:
         model = load_model(horizon)
-        
         return {
             "horizon": horizon,
             "num_features": model.num_features(),
             "num_boosted_rounds": model.num_boosted_rounds(),
-            "feature_names": model.feature_names if model.feature_names else [],
+            "feature_names": model.feature_names or [],
             "expected_order": FEATURE_ORDER,
-            "loaded": True
+            "loaded": True,
         }
     except Exception as e:
-        logger.error(f"Error getting model info: {e}")
-        return {
-            "horizon": horizon,
-            "loaded": False,
-            "error": str(e)
-        }
+        logger.error(f"Error retrieving model info for {horizon}h: {e}")
+        return {"horizon": horizon, "loaded": False, "error": str(e)}
