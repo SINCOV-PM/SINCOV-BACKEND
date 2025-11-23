@@ -1,7 +1,7 @@
-# app/main.py
 from fastapi import FastAPI
 from contextlib import asynccontextmanager
 import logging
+
 from app.services.scheduler_service import start_scheduler
 from app.api.routes_predict import router as predict_router
 from app.api.routes_reports import router as reports_router
@@ -14,7 +14,6 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Manage application startup and shutdown events."""
     setup_logging()
     logger.info("Starting application...")
 
@@ -49,7 +48,6 @@ app.include_router(stations_router)
 
 @app.get("/", tags=["Health"])
 def health_check():
-    """Basic health endpoint for uptime monitoring."""
     return {
         "status": "ok",
         "project": settings.PROJECT_NAME,

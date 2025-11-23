@@ -20,13 +20,13 @@ from app.services.features_service import (
     get_station_name,
     FeaturePreparationError,
 )
-from app.ml.xgboost_model.xgb_predictor import predict_one
+from app.ml.predictor_factory import get_predictor
 
+# -------------------------------------------------------------------------
+# Configuration and logging
+# -------------------------------------------------------------------------
 logger = logging.getLogger(__name__)
 
-# -------------------------------------------------------------------------
-# Constants and custom exceptions
-# -------------------------------------------------------------------------
 ALLOWED_STATIONS = [
     "Centro_de_Alto_Rendimiento", "Guaymaral", "San_Cristobal", "Tunal",
     "Puente_Aranda", "Kennedy", "Fontibon", "Las_Ferias", "Usaquen", "Suba"
@@ -34,13 +34,16 @@ ALLOWED_STATIONS = [
 VALID_HORIZONS = [1, 3, 6, 12]
 
 
+# -------------------------------------------------------------------------
+# Custom exceptions
+# -------------------------------------------------------------------------
 class PredictionError(Exception):
     """Raised when a prediction operation fails."""
     pass
 
 
 # -------------------------------------------------------------------------
-# Station validation
+# Station validation utilities
 # -------------------------------------------------------------------------
 def is_station_allowed(station_id: int) -> bool:
     """Check if a given station is eligible for predictions."""
@@ -48,36 +51,90 @@ def is_station_allowed(station_id: int) -> bool:
     if not station_name:
         return False
 
-    normalized_name = (
-        station_name.lower().replace(" ", "_").replace(".", "")
-    )
+    normalized_name = station_name.lower().replace(" ", "_").replace(".", "")
     return any(allowed.lower() == normalized_name for allowed in ALLOWED_STATIONS)
+
+
+def get_allowed_stations_info() -> list[dict]:
+    """Retrieve coordinates and metadata for allowed stations."""
+    db = SessionLocal()
+    try:
+        normalized_names = [s.lower().replace("_", " ") for s in ALLOWED_STATIONS]
+        result = db.execute(text("""
+            SELECT id, name, latitude, longitude
+            FROM stations
+            WHERE LOWER(REPLACE(name, '_', ' ')) = ANY(:allowed_names)
+        """), {"allowed_names": normalized_names}).fetchall()
+
+        return [
+            {
+                "id": row[0],
+                "name": row[1],
+                "lat": float(row[2]) if row[2] else None,
+                "lng": float(row[3]) if row[3] else None,
+            }
+            for row in result
+        ]
+    except Exception as e:
+        logger.error(f"Error fetching allowed stations: {e}")
+        return []
+    finally:
+        db.close()
+
+
+# -------------------------------------------------------------------------
+# Data retrieval utilities
+# -------------------------------------------------------------------------
+def get_pm25_history_24h(station_id: int) -> List[Dict[str, float]]:
+    """Fetch last 24h of PM2.5 readings for Prophet model."""
+    db = SessionLocal()
+    try:
+        result = db.execute(text("""
+            SELECT s.timestamp AT TIME ZONE 'America/Bogota' as timestamp, s.value
+            FROM sensors s
+            JOIN monitors m ON s.monitor_id = m.id
+            WHERE m.station_id = :station_id
+              AND m.type = 'PM2.5'
+              AND s.timestamp >= NOW() - INTERVAL '24 hours'
+            ORDER BY s.timestamp ASC
+        """), {"station_id": station_id}).fetchall()
+
+        if not result:
+            raise ValueError(f"No PM2.5 data found for last 24h at station {station_id}")
+
+        return [{"ds": row[0], "y": float(row[1])} for row in result]
+    finally:
+        db.close()
 
 
 # -------------------------------------------------------------------------
 # Core prediction logic
 # -------------------------------------------------------------------------
-def generate_prediction(station_id: int, horizons: Optional[List[int]] = None) -> Dict:
+def generate_prediction(
+    station_id: int,
+    horizons: Optional[List[int]] = None,
+    model_type: str = "xgboost",
+) -> Dict:
     """
-    Generate PM2.5 predictions for a given station using XGBoost models.
+    Generate PM2.5 predictions for a given station using Prophet or XGBoost.
 
     Args:
         station_id: Station ID.
-        horizons: List of forecast horizons (default: [1, 3, 6, 12]).
+        horizons: Forecast horizons (default: [1, 3, 6, 12]).
+        model_type: "xgboost" or "prophet".
 
     Returns:
-        Dict with all prediction results.
-
-    Raises:
-        PredictionError: if something goes wrong.
+        Dict with prediction results.
     """
-    logger.info(f"Starting prediction for station {station_id}")
+    logger.info(f"Starting {model_type.upper()} prediction for station {station_id}")
 
+    # Validate horizons
     horizons = horizons or VALID_HORIZONS
     horizons = [h for h in horizons if h in VALID_HORIZONS]
     if not horizons:
         raise PredictionError(f"Invalid horizons. Must be one or more of {VALID_HORIZONS}")
 
+    # Validate station
     if not is_station_allowed(station_id):
         station_name = get_station_name(station_id) or "Unknown"
         raise PredictionError(
@@ -86,64 +143,57 @@ def generate_prediction(station_id: int, horizons: Optional[List[int]] = None) -
         )
 
     try:
-        # 1️⃣ Prepare features
-        logger.info("Preparing input features...")
-        features = prepare_features_for_prediction(station_id)
-
-        # 2️⃣ Predict for each horizon
+        predictor = get_predictor(model_type)
         now = datetime.now(timezone.utc)
         predictions = []
 
-        for horizon in horizons:
-            try:
-                predicted_value = predict_one(features, horizon=horizon)
-                prediction_time = now + timedelta(hours=horizon)
+        if model_type == "prophet":
+            # Prophet: requires PM2.5 historical data
+            logger.info("Fetching 24h PM2.5 history for Prophet...")
+            history = get_pm25_history_24h(station_id)
+            predicted_value = predictor.predict(history)
+            predictions.append({
+                "horizon": 1,
+                "predicted_pm25": round(predicted_value, 2),
+                "timestamp": (now + timedelta(hours=1)).isoformat(),
+            })
+        else:
+            # XGBoost: uses feature engineering
+            logger.info("Preparing features for XGBoost...")
+            features = prepare_features_for_prediction(station_id)
+            for horizon in horizons:
+                try:
+                    value = predictor.predict(features, horizon=horizon)
+                    predictions.append({
+                        "horizon": horizon,
+                        "predicted_pm25": round(value, 2),
+                        "timestamp": (now + timedelta(hours=horizon)).isoformat(),
+                    })
+                except Exception as e:
+                    logger.error(f"Prediction failed for H{horizon}: {e}")
+                    predictions.append({
+                        "horizon": horizon,
+                        "predicted_pm25": None,
+                        "error": str(e),
+                    })
 
-                predictions.append({
-                    "horizon": horizon,
-                    "predicted_pm25": round(predicted_value, 2),
-                    "timestamp": prediction_time.isoformat(),
-                    "features_used": len(features),
-                })
-
-                logger.info(f"H{horizon}: {predicted_value:.2f} μg/m³")
-
-            except Exception as e:
-                logger.error(f"Prediction failed for H{horizon}: {e}")
-                predictions.append({
-                    "horizon": horizon,
-                    "predicted_pm25": None,
-                    "error": str(e),
-                })
-
-        # 3️⃣ Build response
         station_name = get_station_name(station_id)
-        result = {
+        return {
             "success": True,
             "station_id": station_id,
             "station_name": station_name,
             "predictions": predictions,
-            "features": features,
             "generated_at": now.isoformat(),
-            "method": "xgboost",
-            "model_version": "1.0.0",
+            "method": model_type,
+            "model_info": predictor.get_info(),
         }
-
-        logger.info(f"✅ Generated {len(predictions)} predictions for station {station_id}")
-        return result
 
     except FeaturePreparationError as e:
         logger.error(f"Feature preparation failed: {e}")
         raise PredictionError(f"Cannot prepare data: {e}")
-
     except Exception as e:
         logger.exception(f"Unexpected prediction error: {e}")
         raise PredictionError(f"Prediction failed: {e}")
-
-
-def generate_all_horizons_prediction(station_id: int) -> Dict:
-    """Convenience wrapper to predict for all horizons."""
-    return generate_prediction(station_id, horizons=VALID_HORIZONS)
 
 
 # -------------------------------------------------------------------------
@@ -175,62 +225,5 @@ def save_prediction_to_db(
         db.rollback()
         logger.error(f"Error saving prediction: {e}")
         raise
-    finally:
-        db.close()
-
-
-# -------------------------------------------------------------------------
-# Retrieval utilities
-# -------------------------------------------------------------------------
-def get_recent_predictions(station_id: int, limit: int = 10) -> List[Dict]:
-    """Return recent predictions for a given station."""
-    db = SessionLocal()
-    try:
-        records = (
-            db.query(Prediction)
-            .filter(Prediction.station_id == station_id)
-            .order_by(Prediction.created_at.desc())
-            .limit(limit)
-            .all()
-        )
-
-        return [
-            {
-                "id": p.id,
-                "result": p.result,
-                "horizon": getattr(p, "horizon", 1),
-                "created_at": p.created_at.isoformat(),
-                "features": p.features,
-            }
-            for p in records
-        ]
-    finally:
-        db.close()
-
-
-def get_allowed_stations_info() -> List[Dict]:
-    """Retrieve coordinates and metadata for allowed stations."""
-    db = SessionLocal()
-    try:
-        normalized_names = [s.lower().replace("_", " ") for s in ALLOWED_STATIONS]
-        query = text("""
-            SELECT id, name, latitude, longitude
-            FROM stations
-            WHERE LOWER(REPLACE(name, '_', ' ')) = ANY(:allowed_names)
-        """)
-
-        result = db.execute(query, {"allowed_names": normalized_names}).fetchall()
-        return [
-            {
-                "id": row[0],
-                "name": row[1],
-                "lat": float(row[2]) if row[2] else None,
-                "lng": float(row[3]) if row[3] else None,
-            }
-            for row in result
-        ]
-    except Exception as e:
-        logger.error(f"Error fetching allowed stations: {e}")
-        return []
     finally:
         db.close()

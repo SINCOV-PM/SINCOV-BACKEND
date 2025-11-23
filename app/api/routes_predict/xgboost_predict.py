@@ -10,11 +10,18 @@ router = APIRouter(tags=["Prediction"])
 @router.post("/", response_model=PredictionResponse)
 async def predict_pm25(request: PredictionRequest):
     """
-    Generate PM2.5 predictions using XGBoost models.
+    Generate PM2.5 predictions using the selected model (XGBoost or Prophet).
+    Default model: XGBoost.
     """
-    logger.info(f"Prediction request for station {request.station_id}, horizons: {request.horizons}")
+    model_type = request.model_type.lower() if hasattr(request, "model_type") and request.model_type else "xgboost"
+    logger.info(f"Prediction request | station={request.station_id} | model={model_type} | horizons={request.horizons}")
+
     try:
-        result = generate_prediction(request.station_id, request.horizons)
+        result = generate_prediction(
+            station_id=request.station_id,
+            horizons=request.horizons,
+            model_type=model_type
+        )
         return PredictionResponse(**result)
 
     except PredictionError as e:

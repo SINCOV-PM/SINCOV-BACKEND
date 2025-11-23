@@ -1,4 +1,3 @@
-# app/core/logging_config.py
 import logging
 import sys
 
