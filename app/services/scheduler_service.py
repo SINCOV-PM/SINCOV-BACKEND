@@ -3,6 +3,7 @@ import pytz
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from app.jobs.hourly_fetch import fetch_reports_job
+from app.services.report_service import generate_daily_reports
 
 logger = logging.getLogger(__name__)
 
@@ -17,9 +18,9 @@ class SchedulerService:
         self.scheduler = BackgroundScheduler(
             timezone=self.timezone,
             job_defaults={
-                "coalesce": True,          
-                "max_instances": 1,       
-                "misfire_grace_time": 300  
+                "coalesce": True,          # Combina ejecuciones perdidas
+                "max_instances": 1,        # No corre en paralelo
+                "misfire_grace_time": 300  # 5 minutos de tolerancia
             }
         )
         logger.info("SchedulerService initialized with timezone: %s", timezone)
@@ -43,20 +44,30 @@ class SchedulerService:
 
     def _add_recurring_jobs(self):
         """Adds all periodic jobs to the scheduler."""
-        # Ejecuta cada hora exacta al minuto 10
+        # Ejecuta cada hora exacta
         self.scheduler.add_job(
             fetch_reports_job,
-            trigger=CronTrigger(minute=10, second=0, timezone=self.timezone),
+            trigger=CronTrigger(minute=0, second=0, timezone=self.timezone),
             id="fetch_reports_job",
             replace_existing=True,
         )
-        logger.info("Recurring job 'fetch_reports_job' scheduled every hour at minute 13.")
+
+        # reportes diarios exactamente a las 00:00
+        self.scheduler.add_job(
+            generate_daily_reports,
+            'cron',
+            hour=0, minute=0, timezone=self.timezone,
+            id="daily_reports",
+        )
+
+        logger.info("Jobs configurados: fetch cada hora, reportes diarios 00:05.")
 
     def stop(self):
         """Gracefully stop the scheduler."""
         if self.scheduler.running:
             self.scheduler.shutdown(wait=False)
             logger.info("Background scheduler stopped cleanly.")
+
 
 def start_scheduler():
     """Entry point for external use (e.g., from FastAPI lifespan)."""

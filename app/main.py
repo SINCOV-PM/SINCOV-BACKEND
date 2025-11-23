@@ -4,7 +4,8 @@ from contextlib import asynccontextmanager
 import logging
 from app.services.scheduler_service import start_scheduler
 from app.api.routes_predict import router as predict_router
-from app.api import routes_reports, routes_stations
+from app.api.routes_reports import router as reports_router
+from app.api.routes_stations import router as stations_router
 from app.core.config import settings
 from app.core.logging_config import setup_logging
 from fastapi.middleware.cors import CORSMiddleware
@@ -43,8 +44,8 @@ app.add_middleware(
 )
 
 app.include_router(predict_router)
-app.include_router(routes_reports.router, prefix="/reports", tags=["Reports"])
-app.include_router(routes_stations.router, prefix="/stations", tags=["Stations"])
+app.include_router(reports_router)
+app.include_router(stations_router)
 
 @app.get("/", tags=["Health"])
 def health_check():
