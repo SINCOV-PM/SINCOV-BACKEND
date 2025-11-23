@@ -2,9 +2,9 @@
 Hourly Fetch Job
 ----------------
 Fetches air quality data from RMCAB and stores it in the database.
-
-Refactored for consistency with global logging, FastAPI lifespan,
-and scheduler integration.
+Now supports two modes:
+ - full_init=True  → Fetch last 24 hours (startup)
+ - full_init=False → Fetch last hour (hourly job)
 """
 
 import json
@@ -26,12 +26,11 @@ from app.utils.rmcab_utils import (
 from app.core.config import settings
 
 
-# -----------------------------------------------------------------------------
-# Centralized Logging Wrapper
-# -----------------------------------------------------------------------------
+# -------------------------------------------------------------------------
+# Logging Wrapper
+# -------------------------------------------------------------------------
 class FetchJobLogger:
     """Thin wrapper around global logging for structured messages."""
-
     _instance = None
 
     def __new__(cls, name: str = "app.jobs.hourly_fetch"):
@@ -60,22 +59,25 @@ class FetchJobLogger:
         self.logger.info(f"\n{sep}\nTask completed successfully\n{sep}\n")
 
 
-# -----------------------------------------------------------------------------
-# Data Fetcher Class
-# -----------------------------------------------------------------------------
+# -------------------------------------------------------------------------
+# Data Fetcher
+# -------------------------------------------------------------------------
 class RMCABDataFetcher:
     """Handles all RMCAB API interactions and database persistence."""
 
-    def __init__(self, logger: FetchJobLogger):
+    def __init__(self, logger: FetchJobLogger, full_init: bool = False):
         self.logger = logger
         self.host = getattr(settings, "RMCAB_API_URL", "http://rmcab.ambientebogota.gov.co")
         self.base_url = "/Report/GetMultiStationsReportNewAsync"
         self.tz = pytz.timezone("America/Bogota")
-        self.time_configs = [{"name": "Last 24 hours", "hours": 24, "granularity": 60}]
 
-    # -------------------------------------------------------------------------
-    # Public API
-    # -------------------------------------------------------------------------
+        # Choose time window: 24h on init, 1h otherwise
+        if full_init:
+            self.time_configs = [{"name": "Initial 24h Load", "hours": 24, "granularity": 60}]
+        else:
+            self.time_configs = [{"name": "Last hour", "hours": 1, "granularity": 60}]
+
+    # ---------------------------------------------------------------------
     def fetch_station_data(self, station: Station, monitors: List[Monitor]) -> bool:
         """Fetch data for a single station."""
         self.logger.section_header(f"Processing: {station.name} (RMCAB ID: {station.station_rmcab_id})")
@@ -96,16 +98,8 @@ class RMCABDataFetcher:
         self.logger.warning(f"No data found for {station.name} in any time range")
         return False
 
-    # -------------------------------------------------------------------------
-    # Internal helpers
-    # -------------------------------------------------------------------------
-    def _try_time_range(
-        self,
-        station: Station,
-        monitor_ids: List[str],
-        monitor_dict: Dict[str, Monitor],
-        config: Dict,
-    ) -> bool:
+    # ---------------------------------------------------------------------
+    def _try_time_range(self, station, monitor_ids, monitor_dict, config) -> bool:
         """Try to fetch data for a specific time window."""
         now = datetime.now(self.tz)
         from_time = now - timedelta(hours=config["hours"])
@@ -140,14 +134,7 @@ class RMCABDataFetcher:
 
         return False
 
-    def _build_api_params(
-        self,
-        station: Station,
-        monitor_ids: List[str],
-        from_time: datetime,
-        to_time: datetime,
-        config: Dict,
-    ) -> Dict:
+    def _build_api_params(self, station, monitor_ids, from_time, to_time, config) -> Dict:
         """Construct API parameters."""
         return build_rmcab_params(
             station_id=station.station_rmcab_id,
@@ -177,9 +164,7 @@ class RMCABDataFetcher:
             return data
         return []
 
-    def _process_and_save_data(
-        self, data_list: List[Dict], monitor_dict: Dict[str, Monitor], now: datetime
-    ) -> int:
+    def _process_and_save_data(self, data_list, monitor_dict, now) -> int:
         """Process and persist fetched data."""
         db = SessionLocal()
         saved = 0
@@ -216,16 +201,12 @@ class RMCABDataFetcher:
 
         return saved
 
-    # -------------------------------------------------------------------------
-    # Utility Methods
-    # -------------------------------------------------------------------------
+    # ---------------------------------------------------------------------
     @staticmethod
     def _parse_timestamp(record: Dict, default: datetime) -> Optional[datetime]:
         """Parse timestamp safely."""
         dt_str = record.get("datetime", "").strip()
-        if dt_str in [
-            "Minimum", "Maximum", "Average", "Summary:", "MinDate", "MaxDate", "",
-        ]:
+        if dt_str in ["Minimum", "Maximum", "Average", "Summary:", "MinDate", "MaxDate", ""]:
             return None
         try:
             return parse_rmcab_timestamp(dt_str, "America/Bogota")
@@ -234,12 +215,10 @@ class RMCABDataFetcher:
 
     @staticmethod
     def _skip_field(key: str) -> bool:
-        """Return True if the key is not a valid sensor reading."""
         return key.lower() in {"timestamp", "date", "datetime", "time", "count", "id", "stationid"}
 
     @staticmethod
     def _find_monitor(key: str, monitor_dict: Dict[str, Monitor]) -> Optional[Monitor]:
-        """Find the correct monitor for a given field name."""
         if key in monitor_dict:
             return monitor_dict[key]
         for code, m in monitor_dict.items():
@@ -249,7 +228,6 @@ class RMCABDataFetcher:
 
     @staticmethod
     def _parse_value(value) -> Optional[float]:
-        """Convert and validate numeric values."""
         if value is None or str(value).strip() in {"", "----", "N/A", "NA", "null", "None"}:
             return None
         try:
@@ -262,23 +240,23 @@ class RMCABDataFetcher:
 
     @staticmethod
     def _sensor_exists(db, monitor_id: int, timestamp: datetime) -> bool:
-        """Check if a record already exists."""
         return db.query(Sensor).filter(
             Sensor.monitor_id == monitor_id, Sensor.timestamp == timestamp
         ).first() is not None
 
 
-# -----------------------------------------------------------------------------
-# Job Entrypoints
-# -----------------------------------------------------------------------------
-def fetch_reports_job():
+# -------------------------------------------------------------------------
+# Job Entrypoint
+# -------------------------------------------------------------------------
+def fetch_reports_job(full_init: bool = False):
     """Main job executed by the scheduler."""
     logger = FetchJobLogger()
-    fetcher = RMCABDataFetcher(logger)
+    fetcher = RMCABDataFetcher(logger, full_init=full_init)
 
-    logger.section_header("Starting RMCAB Data Fetch Job")
+    title = "Initial 24h Fetch" if full_init else "Hourly 1h Fetch"
+    logger.section_header(f"Starting RMCAB Data Fetch Job: {title}")
+
     db = SessionLocal()
-
     try:
         stations = db.query(Station).all()
         logger.info(f"Found {len(stations)} stations in database")
@@ -320,10 +298,11 @@ def log_execution_summary():
     finally:
         db.close()
 
+
 if __name__ == "__main__":
     from app.core.logging_config import setup_logging
 
     setup_logging()
     print("Running fetch_reports_job manually...\n")
-    fetch_reports_job()
+    fetch_reports_job(full_init=True)
     log_execution_summary()
