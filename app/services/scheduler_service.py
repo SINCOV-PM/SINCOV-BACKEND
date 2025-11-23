@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 class SchedulerService:
     """
     Manages background job scheduling using APScheduler.
-    Handles both immediate and recurring tasks.
+    Runs initial 24h fetch at startup, then hourly fetch at minute 15.
     """
 
     def __init__(self, timezone: str = "America/Bogota"):
@@ -18,49 +18,50 @@ class SchedulerService:
         self.scheduler = BackgroundScheduler(
             timezone=self.timezone,
             job_defaults={
-                "coalesce": True,          # Combina ejecuciones perdidas
-                "max_instances": 1,        # No corre en paralelo
-                "misfire_grace_time": 300  # 5 minutos de tolerancia
-            }
+                "coalesce": True,
+                "max_instances": 1,
+                "misfire_grace_time": 300,
+            },
         )
         logger.info("SchedulerService initialized with timezone: %s", timezone)
 
     def start(self):
-        """Run immediate job and set up recurring tasks."""
-        self._run_immediate_job()
+        """Run initial job (24 h) and set recurring tasks."""
+        self._run_initial_job()
         self._add_recurring_jobs()
         self.scheduler.start()
         logger.info("Background scheduler started successfully.")
         return self.scheduler
 
-    def _run_immediate_job(self):
-        """Executes the fetch job once at startup."""
-        logger.info("Running initial data synchronization job...")
+    def _run_initial_job(self):
+        """Executes the fetch job once at startup (24h window)."""
+        logger.info("Running initial 24h data fetch job...")
         try:
-            fetch_reports_job()
-            logger.info("Initial job completed successfully.")
+            fetch_reports_job(full_init=True)
+            logger.info("Initial 24h job completed successfully.")
         except Exception as e:
             logger.exception("Error during initial job execution: %s", e)
 
     def _add_recurring_jobs(self):
-        """Adds all periodic jobs to the scheduler."""
-        # Ejecuta cada hora exacta
+        """Adds periodic jobs: hourly fetch (:15) and daily reports (00:00)."""
+
+        # Fetch last hour data every hour at minute 15
         self.scheduler.add_job(
             fetch_reports_job,
-            trigger=CronTrigger(minute=0, second=0, timezone=self.timezone),
-            id="fetch_reports_job",
+            trigger=CronTrigger(minute=15, second=0, timezone=self.timezone),
+            id="fetch_reports_hourly",
             replace_existing=True,
         )
 
-        # reportes diarios exactamente a las 00:00
+        # Generate daily reports at midnight
         self.scheduler.add_job(
             generate_daily_reports,
-            'cron',
-            hour=0, minute=0, timezone=self.timezone,
+            trigger=CronTrigger(hour=0, minute=0, timezone=self.timezone),
             id="daily_reports",
+            replace_existing=True,
         )
 
-        logger.info("Jobs configurados: fetch cada hora, reportes diarios 00:05.")
+        logger.info("Jobs configured: hourly fetch at :15, daily reports at 00:00.")
 
     def stop(self):
         """Gracefully stop the scheduler."""

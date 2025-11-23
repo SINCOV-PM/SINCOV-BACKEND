@@ -141,7 +141,7 @@ def test_reports_summary_endpoint():
         assert "data" in data
         
         summary = data["data"]
-        assert "total_reports" in summary  # ✅ corregido
+        assert "total_reports" in summary
         assert "avg_pm25" in summary
         assert "min_pm25" in summary
         assert "max_pm25" in summary
