@@ -56,7 +56,7 @@ class SchedulerService:
         # Generate daily reports at midnight
         self.scheduler.add_job(
             generate_daily_reports,
-            trigger=CronTrigger(hour=0, minute=0, timezone=self.timezone),
+            trigger=CronTrigger(hour=0, minute=15, timezone=self.timezone),
             id="daily_reports",
             replace_existing=True,
         )
