@@ -1,324 +1,229 @@
-#app/services/prediction_service.py
 """
-Prediction service for PM2.5 forecasting.
-
-Orchestrates feature preparation and model prediction.
+Prediction Service
+------------------
+Handles orchestration of PM2.5 forecasting:
+ - Validates allowed stations
+ - Prepares input features
+ - Runs ML predictions (XGBoost / Prophet)
+ - Persists results in the database
 """
 
-from datetime import datetime, timezone, timedelta
-from typing import List, Dict
 import logging
+from datetime import datetime, timezone, timedelta
+from typing import List, Dict, Optional
+from sqlalchemy import text
+
 from app.db.session import SessionLocal
 from app.models.predict import Prediction
 from app.services.features_service import (
     prepare_features_for_prediction,
     get_station_name,
-    FeaturePreparationError
+    FeaturePreparationError,
 )
+from app.ml.predictor_factory import get_predictor
 
-from app.ml_models.xgboost.predictor import predict_one, predict_all_horizons
+# -------------------------------------------------------------------------
+# Configuration and logging
+# -------------------------------------------------------------------------
 logger = logging.getLogger(__name__)
 
-# Estaciones permitidas para predicción (las 10 con datos completos)
 ALLOWED_STATIONS = [
-    "Centro_de_Alto_Rendimiento",
-    "Guaymaral",
-    "San_Cristobal",
-    "Tunal",
-    "Puente_Aranda",
-    "Kennedy",
-    "Fontibon",
-    "Las_Ferias",
-    "Usaquen",
-    "Suba"
+    "Centro_de_Alto_Rendimiento", "Guaymaral", "San_Cristobal", "Tunal",
+    "Puente_Aranda", "Kennedy", "Fontibon", "Las_Ferias", "Usaquen", "Suba"
 ]
+VALID_HORIZONS = [1, 3, 6, 12]
 
 
+# -------------------------------------------------------------------------
+# Custom exceptions
+# -------------------------------------------------------------------------
 class PredictionError(Exception):
-    """Exception raised when prediction fails."""
+    """Raised when a prediction operation fails."""
     pass
 
 
+# -------------------------------------------------------------------------
+# Station validation utilities
+# -------------------------------------------------------------------------
 def is_station_allowed(station_id: int) -> bool:
-    """
-    Check if a station is allowed for predictions.
-    
-    Args:
-        station_id: Station ID
-        
-    Returns:
-        True if station is in the allowed list
-    """
+    """Check if a given station is eligible for predictions."""
     station_name = get_station_name(station_id)
-    
     if not station_name:
         return False
-    
-    # Normalize station name for comparison
+
     normalized_name = station_name.lower().replace(" ", "_").replace(".", "")
-    
-    return any(
-        allowed.lower() == normalized_name
-        for allowed in ALLOWED_STATIONS
-    )
+    return any(allowed.lower() == normalized_name for allowed in ALLOWED_STATIONS)
 
 
+def get_allowed_stations_info() -> list[dict]:
+    """Retrieve coordinates and metadata for allowed stations."""
+    db = SessionLocal()
+    try:
+        normalized_names = [s.lower().replace("_", " ") for s in ALLOWED_STATIONS]
+        result = db.execute(text("""
+            SELECT id, name, latitude, longitude
+            FROM stations
+            WHERE LOWER(REPLACE(name, '_', ' ')) = ANY(:allowed_names)
+        """), {"allowed_names": normalized_names}).fetchall()
+
+        return [
+            {
+                "id": row[0],
+                "name": row[1],
+                "lat": float(row[2]) if row[2] else None,
+                "lng": float(row[3]) if row[3] else None,
+            }
+            for row in result
+        ]
+    except Exception as e:
+        logger.error(f"Error fetching allowed stations: {e}")
+        return []
+    finally:
+        db.close()
+
+
+# -------------------------------------------------------------------------
+# Data retrieval utilities
+# -------------------------------------------------------------------------
+def get_pm25_history_24h(station_id: int) -> List[Dict[str, float]]:
+    """Fetch last 24h of PM2.5 readings for Prophet model."""
+    db = SessionLocal()
+    try:
+        result = db.execute(text("""
+            SELECT s.timestamp AT TIME ZONE 'America/Bogota' as timestamp, s.value
+            FROM sensors s
+            JOIN monitors m ON s.monitor_id = m.id
+            WHERE m.station_id = :station_id
+              AND m.type = 'PM2.5'
+              AND s.timestamp >= NOW() - INTERVAL '24 hours'
+            ORDER BY s.timestamp ASC
+        """), {"station_id": station_id}).fetchall()
+
+        if not result:
+            raise ValueError(f"No PM2.5 data found for last 24h at station {station_id}")
+
+        return [{"ds": row[0], "y": float(row[1])} for row in result]
+    finally:
+        db.close()
+
+
+# -------------------------------------------------------------------------
+# Core prediction logic
+# -------------------------------------------------------------------------
 def generate_prediction(
     station_id: int,
-    horizons: List[int] = None
+    horizons: Optional[List[int]] = None,
+    model_type: str = "xgboost",
 ) -> Dict:
     """
-    Generate PM2.5 predictions for a station.
-    
+    Generate PM2.5 predictions for a given station using Prophet or XGBoost.
+
     Args:
-        station_id: ID of the station
-        horizons: List of horizons to predict (default: [1, 3, 6, 12])
-        
+        station_id: Station ID.
+        horizons: Forecast horizons (default: [1, 3, 6, 12]).
+        model_type: "xgboost" or "prophet".
+
     Returns:
-        Dictionary with prediction results
-        
-    Raises:
-        PredictionError: If prediction fails
-        
-    Example:
-        >>> result = generate_prediction(1, horizons=[1, 6, 12])
-        >>> print(result['predictions'])
-        [
-            {'horizon': 1, 'value': 12.5, 'timestamp': '...'},
-            {'horizon': 3, 'value': 12.5, 'timestamp': '...'},
-            {'horizon': 6, 'value': 15.8, 'timestamp': '...'},
-            {'horizon': 12, 'value': 18.3, 'timestamp': '...'}
-        ]
+        Dict with prediction results.
     """
-    logger.info(f"Starting prediction for station {station_id}")
-    
-    # Default horizons
-    if horizons is None:
-        horizons = [1, 3, 6, 12]
-    
+    logger.info(f"Starting {model_type.upper()} prediction for station {station_id}")
+
     # Validate horizons
-    valid_horizons = [1, 3, 6, 12]
-    horizons = [h for h in horizons if h in valid_horizons]
-    
+    horizons = horizons or VALID_HORIZONS
+    horizons = [h for h in horizons if h in VALID_HORIZONS]
     if not horizons:
-        raise PredictionError(
-            f"Invalid horizons. Must be one or more of {valid_horizons}"
-        )
-    
-    # Check if station is allowed
+        raise PredictionError(f"Invalid horizons. Must be one or more of {VALID_HORIZONS}")
+
+    # Validate station
     if not is_station_allowed(station_id):
         station_name = get_station_name(station_id) or "Unknown"
         raise PredictionError(
-            f"Station '{station_name}' is not in the allowed list for predictions. "
-            f"Only these stations are supported: {', '.join(ALLOWED_STATIONS)}"
+            f"Station '{station_name}' is not allowed. "
+            f"Allowed stations: {', '.join(ALLOWED_STATIONS)}"
         )
-    
+
     try:
-        # 1. Prepare features
-        logger.info("Preparing features...")
-        features = prepare_features_for_prediction(station_id)
-        
-        # 2. Generate predictions for each horizon
-        logger.info(f"Generating predictions for horizons: {horizons}")
-        predictions = []
+        predictor = get_predictor(model_type)
         now = datetime.now(timezone.utc)
-        
-        for horizon in horizons:
-            try:
-                # Predict
-                predicted_value = predict_one(features, horizon=horizon)
-                
-                # Calculate timestamp for this horizon
-                prediction_time = now + timedelta(hours=horizon)
-                
-                predictions.append({
-                    "horizon": horizon,
-                    "predicted_pm25": round(predicted_value, 2),
-                    "timestamp": prediction_time.isoformat(),
-                    "features_used": len(features)
-                })
-                
-                logger.info(
-                    f" Horizon {horizon}h: {predicted_value:.2f} μg/m³"
-                )
-                
-            except Exception as e:
-                logger.error(f" Failed prediction for horizon {horizon}h: {e}")
-                predictions.append({
-                    "horizon": horizon,
-                    "predicted_pm25": None,
-                    "error": str(e)
-                })
-        
-        # 3. Build response
+        predictions = []
+
+        if model_type == "prophet":
+            # Prophet: requires PM2.5 historical data
+            logger.info("Fetching 24h PM2.5 history for Prophet...")
+            history = get_pm25_history_24h(station_id)
+            predicted_value = predictor.predict(history)
+            predictions.append({
+                "horizon": 1,
+                "predicted_pm25": round(predicted_value, 2),
+                "timestamp": (now + timedelta(hours=1)).isoformat(),
+            })
+        else:
+            # XGBoost: uses feature engineering
+            logger.info("Preparing features for XGBoost...")
+            features = prepare_features_for_prediction(station_id)
+            for horizon in horizons:
+                try:
+                    value = predictor.predict(features, horizon=horizon)
+                    predictions.append({
+                        "horizon": horizon,
+                        "predicted_pm25": round(value, 2),
+                        "timestamp": (now + timedelta(hours=horizon)).isoformat(),
+                    })
+                except Exception as e:
+                    logger.error(f"Prediction failed for H{horizon}: {e}")
+                    predictions.append({
+                        "horizon": horizon,
+                        "predicted_pm25": None,
+                        "error": str(e),
+                    })
+
         station_name = get_station_name(station_id)
-        
-        result = {
+        return {
             "success": True,
             "station_id": station_id,
             "station_name": station_name,
             "predictions": predictions,
-            "features": features,
             "generated_at": now.isoformat(),
-            "method": "xgboost",
-            "model_version": "1.0"
+            "method": model_type,
+            "model_info": predictor.get_info(),
         }
-        
-        logger.info(
-            f" Successfully generated {len(predictions)} predictions "
-            f"for station {station_id}"
-        )
-        
-        return result
-        
+
     except FeaturePreparationError as e:
-        logger.error(f" Feature preparation failed: {e}")
-        raise PredictionError(f"Cannot prepare data: {str(e)}")
-    
+        logger.error(f"Feature preparation failed: {e}")
+        raise PredictionError(f"Cannot prepare data: {e}")
     except Exception as e:
-        logger.error(f" Unexpected error in prediction: {e}", exc_info=True)
-        raise PredictionError(f"Prediction failed: {str(e)}")
+        logger.exception(f"Unexpected prediction error: {e}")
+        raise PredictionError(f"Prediction failed: {e}")
 
 
-def generate_all_horizons_prediction(
-    station_id: int
-) -> Dict:
-    """
-    Generate predictions for ALL available horizons (1, 3, 6, 12).
-    
-    This is a convenience wrapper around generate_prediction.
-    
-    Args:
-        station_id: ID of the station
-        
-    Returns:
-        Dictionary with prediction results for all horizons
-    """
-    return generate_prediction(station_id, horizons=[1, 3, 6, 12])
-
-
+# -------------------------------------------------------------------------
+# Database persistence
+# -------------------------------------------------------------------------
 def save_prediction_to_db(
     station_id: int,
     features: Dict,
     result: float,
-    horizon: int = 1
+    horizon: int = 1,
 ) -> Prediction:
-    """
-    Save a prediction to the database.
-    
-    Args:
-        station_id: Station ID
-        features: Feature dictionary used for prediction
-        result: Predicted PM2.5 value
-        horizon: Prediction horizon in hours
-        
-    Returns:
-        Saved Prediction object
-    """
+    """Save a prediction record into the database."""
     db = SessionLocal()
-    
     try:
         prediction = Prediction(
             station_id=station_id,
             features=features,
             result=result,
             horizon=horizon,
-            created_at=datetime.now(timezone.utc)
+            created_at=datetime.now(timezone.utc),
         )
-        
         db.add(prediction)
         db.commit()
         db.refresh(prediction)
-        
-        logger.info(
-            f" Saved prediction {prediction.id} for station {station_id}, "
-            f"horizon {horizon}h: {result:.2f} μg/m³"
-        )
-        
+
+        logger.info(f"Saved prediction {prediction.id} (H{horizon}) for station {station_id}")
         return prediction
-        
     except Exception as e:
         db.rollback()
-        logger.error(f" Error saving prediction: {e}")
+        logger.error(f"Error saving prediction: {e}")
         raise
-    finally:
-        db.close()
-
-
-def get_recent_predictions(
-    station_id: int,
-    limit: int = 10
-) -> List[Dict]:
-    """
-    Get recent predictions for a station.
-    
-    Args:
-        station_id: Station ID
-        limit: Maximum number of predictions to return
-        
-    Returns:
-        List of recent predictions
-    """
-    db = SessionLocal()
-    
-    try:
-        predictions = db.query(Prediction).filter(
-            Prediction.station_id == station_id
-        ).order_by(
-            Prediction.created_at.desc()
-        ).limit(limit).all()
-        
-        return [
-            {
-                "id": p.id,
-                "result": p.result,
-                "horizon": getattr(p, 'horizon', 1),  # Default to 1h if not set
-                "created_at": p.created_at.isoformat(),
-                "features": p.features
-            }
-            for p in predictions
-        ]
-        
-    finally:
-        db.close()
-
-
-def get_allowed_stations_info() -> List[Dict]:
-    """
-    Get information about stations allowed for predictions.
-    
-    Returns:
-        List of allowed stations with their IDs and names
-    """
-    from sqlalchemy import text
-    db = SessionLocal()
-    
-    try:
-        # Normalize allowed names for SQL comparison
-        normalized_names = [s.lower().replace("_", " ") for s in ALLOWED_STATIONS]
-        
-        query = text("""
-            SELECT id, name, latitude, longitude
-            FROM stations
-            WHERE LOWER(REPLACE(name, '_', ' ')) = ANY(:allowed_names)
-        """)
-        
-        result = db.execute(query, {
-            "allowed_names": normalized_names
-        }).fetchall()
-        
-        return [
-            {
-                "id": row[0],
-                "name": row[1],
-                "lat": float(row[2]) if row[2] else None,
-                "lng": float(row[3]) if row[3] else None
-            }
-            for row in result
-        ]
-        
-    except Exception as e:
-        logger.error(f"Error fetching allowed stations: {e}")
-        return []
     finally:
         db.close()
