@@ -10,6 +10,7 @@ from app.core.config import settings
 from app.core.logging_config import setup_logging
 from fastapi.middleware.cors import CORSMiddleware
 from app.jobs.hourly_fetch import fetch_reports_job
+from app.services.report_service import generate_daily_reports
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +20,7 @@ async def lifespan(app: FastAPI):
     logger.info("Starting application...")
     
     fetch_reports_job(full_init=True)
+    generate_daily_reports()
 
     scheduler = start_scheduler()
     logger.info("Scheduler started.")
