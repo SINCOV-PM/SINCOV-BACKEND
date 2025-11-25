@@ -11,6 +11,7 @@ import json
 import requests
 import logging
 import pytz
+import re
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 
@@ -101,11 +102,25 @@ class RMCABDataFetcher:
     # ---------------------------------------------------------------------
     def _try_time_range(self, station, monitor_ids, monitor_dict, config) -> bool:
         """Try to fetch data for a specific time window."""
+
         now = datetime.now(self.tz)
-        from_time = now - timedelta(hours=config["hours"])
-        to_time = now
+
+        # Redondear hacia abajo a la hora completa
+        now_rounded = now.replace(minute=0, second=0, microsecond=0)
+
+        # Caso inicial: full_init=True  -> nombre = "Initial 24h Load"
+        if config["hours"] == 24:
+            # Día anterior COMPLETO desde las 00:00
+            yesterday = (now_rounded - timedelta(days=1)).replace(hour=0)
+            from_time = yesterday
+            to_time = now_rounded
+        else:
+            # Caso normal: última hora completa
+            from_time = now_rounded
+            to_time = now_rounded
 
         self.logger.info(f"Testing time range: {config['name']} ({from_time} → {to_time})")
+
         params = self._build_api_params(station, monitor_ids, from_time, to_time, config)
 
         try:
@@ -120,7 +135,7 @@ class RMCABDataFetcher:
             if not data_list:
                 return False
 
-            saved = self._process_and_save_data(data_list, monitor_dict, now)
+            saved = self._process_and_save_data(data_list, monitor_dict, now_rounded)
             if saved > 0:
                 self.logger.info(f"Saved {saved} records successfully")
                 return True
@@ -134,6 +149,8 @@ class RMCABDataFetcher:
 
         return False
 
+
+    # ---------------------------------------------------------------------
     def _build_api_params(self, station, monitor_ids, from_time, to_time, config) -> Dict:
         """Construct API parameters."""
         return build_rmcab_params(
@@ -144,26 +161,25 @@ class RMCABDataFetcher:
             to_ticks=to_dotnet_ticks(to_time.isoformat(), str(self.tz)),
             granularity_minutes=config["granularity"],
             report_type="Average",
-            take=0,
-            page_size=0,
+            take=config["granularity"],
+            page_size=config["granularity"],
         )
 
+    # ---------------------------------------------------------------------
     def _parse_response(self, response) -> List[Dict]:
-        """Decode JSON and normalize response."""
+        """Decode JSON and normalize response. Only returns Data[] list."""
         try:
             data = response.json()
-        except json.JSONDecodeError as e:
-            self.logger.error(f"Invalid JSON in API response: {e}")
+        except json.JSONDecodeError:
+            self.logger.error("Invalid JSON in API response")
             return []
 
-        if isinstance(data, dict):
-            for key in ["Data", "data", "results"]:
-                if isinstance(data.get(key), list):
-                    return data[key]
-        elif isinstance(data, list):
-            return data
+        if isinstance(data, dict) and isinstance(data.get("Data"), list):
+            return data["Data"]  # Ignore summary ALWAYS
+
         return []
 
+    # ---------------------------------------------------------------------
     def _process_and_save_data(self, data_list, monitor_dict, now) -> int:
         """Process and persist fetched data."""
         db = SessionLocal()
@@ -171,15 +187,16 @@ class RMCABDataFetcher:
 
         try:
             for record in data_list:
-                timestamp = self._parse_timestamp(record, now)
+                timestamp = self._parse_timestamp(record)
                 if not timestamp:
                     continue
 
                 for key, value in record.items():
+
                     if self._skip_field(key):
                         continue
 
-                    monitor = self._find_monitor(key, monitor_dict)
+                    monitor = monitor_dict.get(key)
                     if not monitor:
                         continue
 
@@ -188,11 +205,15 @@ class RMCABDataFetcher:
                         continue
 
                     if not self._sensor_exists(db, monitor.id, timestamp):
-                        db.add(Sensor(monitor_id=monitor.id, timestamp=timestamp, value=val))
+                        db.add(Sensor(
+                            monitor_id=monitor.id,
+                            timestamp=timestamp,
+                            value=val
+                        ))
                         saved += 1
 
-            if saved:
-                db.commit()
+            db.commit()
+
         except Exception as e:
             db.rollback()
             self.logger.error("Error while saving data", e)
@@ -203,45 +224,56 @@ class RMCABDataFetcher:
 
     # ---------------------------------------------------------------------
     @staticmethod
-    def _parse_timestamp(record: Dict, default: datetime) -> Optional[datetime]:
-        """Parse timestamp safely."""
+    def _parse_timestamp(record: Dict) -> Optional[datetime]:
+        """Parse timestamp safely without defaults."""
         dt_str = record.get("datetime", "").strip()
-        if dt_str in ["Minimum", "Maximum", "Average", "Summary:", "MinDate", "MaxDate", ""]:
+
+        if not dt_str or dt_str.lower() in {
+            "minimum", "maximum", "average", "summary:",
+            "mindate", "maxdate", "mintime", "maxtime"
+        }:
             return None
+
         try:
             return parse_rmcab_timestamp(dt_str, "America/Bogota")
-        except Exception:
-            return default
+        except:
+            return None
 
+    # ---------------------------------------------------------------------
     @staticmethod
     def _skip_field(key: str) -> bool:
-        return key.lower() in {"timestamp", "date", "datetime", "time", "count", "id", "stationid"}
+        """Allow only sensor fields S_X_Y."""
+        if key.lower() == "datetime":
+            return False
+        return not re.match(r"^S_\d+_\d+$", key)
 
-    @staticmethod
-    def _find_monitor(key: str, monitor_dict: Dict[str, Monitor]) -> Optional[Monitor]:
-        if key in monitor_dict:
-            return monitor_dict[key]
-        for code, m in monitor_dict.items():
-            if key.endswith(code.split("_")[-1]):
-                return m
-        return None
-
+    # ---------------------------------------------------------------------
     @staticmethod
     def _parse_value(value) -> Optional[float]:
-        if value is None or str(value).strip() in {"", "----", "N/A", "NA", "null", "None"}:
+        """Normalize RMCAB values and ignore non-numeric readings."""
+        if value is None:
             return None
+
+        s = str(value).strip()
+
+        if s in {"", "----", "-", "N/A", "NaN", "NA", "null", "None"}:
+            return None
+
         try:
             val = float(value)
             if -999999 < val < 999999:
                 return val
-        except (ValueError, TypeError):
-            pass
+        except:
+            return None
+
         return None
 
+    # ---------------------------------------------------------------------
     @staticmethod
     def _sensor_exists(db, monitor_id: int, timestamp: datetime) -> bool:
         return db.query(Sensor).filter(
-            Sensor.monitor_id == monitor_id, Sensor.timestamp == timestamp
+            Sensor.monitor_id == monitor_id,
+            Sensor.timestamp == timestamp
         ).first() is not None
 
 

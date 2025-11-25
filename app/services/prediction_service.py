@@ -86,7 +86,10 @@ def get_allowed_stations_info() -> list[dict]:
 # Data retrieval utilities
 # -------------------------------------------------------------------------
 def get_pm25_history_24h(station_id: int) -> List[Dict[str, float]]:
-    """Fetch last 24h of PM2.5 readings for Prophet model."""
+    """
+    Fetch last 24h of PM2.5 readings for Prophet.
+    Converts DB timestamps from Bogotá TZ → UTC → naïve (required by Prophet).
+    """
     db = SessionLocal()
     try:
         result = db.execute(text("""
@@ -102,9 +105,27 @@ def get_pm25_history_24h(station_id: int) -> List[Dict[str, float]]:
         if not result:
             raise ValueError(f"No PM2.5 data found for last 24h at station {station_id}")
 
-        return [{"ds": row[0], "y": float(row[1])} for row in result]
+        history = []
+        for row in result:
+            ts = row[0]
+
+            # ts viene con timezone: 2025-11-24 23:00:00-05:00
+            # convertimos a UTC
+            ts_utc = ts.astimezone(timezone.utc)
+
+            # removemos zona horaria → Prophet lo exige naive
+            ts_naive = ts_utc.replace(tzinfo=None)
+
+            history.append({
+                "ds": ts_naive,
+                "y": float(row[1])
+            })
+
+        return history
+
     finally:
         db.close()
+
 
 
 # -------------------------------------------------------------------------
@@ -117,22 +138,9 @@ def generate_prediction(
 ) -> Dict:
     """
     Generate PM2.5 predictions for a given station using Prophet or XGBoost.
-
-    Args:
-        station_id: Station ID.
-        horizons: Forecast horizons (default: [1, 3, 6, 12]).
-        model_type: "xgboost" or "prophet".
-
-    Returns:
-        Dict with prediction results.
     """
-    logger.info(f"Starting {model_type.upper()} prediction for station {station_id}")
 
-    # Validate horizons
-    horizons = horizons or VALID_HORIZONS
-    horizons = [h for h in horizons if h in VALID_HORIZONS]
-    if not horizons:
-        raise PredictionError(f"Invalid horizons. Must be one or more of {VALID_HORIZONS}")
+    logger.info(f"Starting {model_type.upper()} prediction for station {station_id}")
 
     # Validate station
     if not is_station_allowed(station_id):
@@ -142,25 +150,42 @@ def generate_prediction(
             f"Allowed stations: {', '.join(ALLOWED_STATIONS)}"
         )
 
+    # Horizons default
+    horizons = horizons or VALID_HORIZONS
+
+    # XGBoost valid horizons = 1,3,6,12
+    # Prophet valid horizons = 24 ONLY
+    if model_type == "prophet":
+        horizons = [24]     # override everything
+    else:
+        horizons = [h for h in horizons if h in VALID_HORIZONS]
+
+    if not horizons:
+        raise PredictionError(f"Invalid horizons. Must be one or more of {VALID_HORIZONS}.")
+
     try:
         predictor = get_predictor(model_type)
         now = datetime.now(timezone.utc)
         predictions = []
 
         if model_type == "prophet":
-            # Prophet: requires PM2.5 historical data
+            # Prophet ONLY supports 24h
             logger.info("Fetching 24h PM2.5 history for Prophet...")
             history = get_pm25_history_24h(station_id)
-            predicted_value = predictor.predict(history)
+
+            predicted_value = predictor.predict(history, horizon=24)
+
             predictions.append({
-                "horizon": 1,
+                "horizon": 24,
                 "predicted_pm25": round(predicted_value, 2),
-                "timestamp": (now + timedelta(hours=1)).isoformat(),
+                "timestamp": (now + timedelta(hours=24)).isoformat(),
             })
+
         else:
-            # XGBoost: uses feature engineering
+            # XGBoost branch
             logger.info("Preparing features for XGBoost...")
             features = prepare_features_for_prediction(station_id)
+
             for horizon in horizons:
                 try:
                     value = predictor.predict(features, horizon=horizon)
@@ -194,7 +219,6 @@ def generate_prediction(
     except Exception as e:
         logger.exception(f"Unexpected prediction error: {e}")
         raise PredictionError(f"Prediction failed: {e}")
-
 
 # -------------------------------------------------------------------------
 # Database persistence
