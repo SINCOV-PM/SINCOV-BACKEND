@@ -12,12 +12,12 @@ logger = logging.getLogger(__name__)
 def calculate_pm25_status(value: float) -> str:
     """Classifies air quality based on PM2.5"""
     if value >= 55.5:
-        return "Very High"
+        return "Alto"
     elif value >= 35.5:
-        return "High"
+        return "Regular"
     elif value >= 12.1:
-        return "Moderate"
-    return "Good"
+        return "Moderado"
+    return "Bueno"
 
 def generate_daily_reports():
     """
